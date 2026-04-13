@@ -37,3 +37,6 @@ var ErrNilLastCommitedEpochStartHdr = errors.New("nil last commited epoch start 
 
 // ErrLastCommitedEpochStartHdrMismatch signals that the current header epoch and last commited epoch start header epoch do not match
 var ErrLastCommitedEpochStartHdrMismatch = errors.New("current header epoch and last commited epoch start header epoch do not match")
+
+// ErrNilDRWAAccountsAdapter signals that a nil accounts adapter was provided for the DRWA hook state adapter
+var ErrNilDRWAAccountsAdapter = errors.New("nil accounts adapter for DRWA hook state adapter")
