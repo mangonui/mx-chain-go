@@ -61,6 +61,9 @@
     # ESDTEnableEpoch represents the epoch when ESDT is enabled
     ESDTEnableEpoch = 1
 
+    # DRWAEnforcementEnableEpoch represents the epoch when DRWA regulated-token enforcement is enabled
+    DRWAEnforcementEnableEpoch = 0
+
     # GovernanceEnableEpoch represents the epoch when governance is enabled
     GovernanceEnableEpoch = 1
 

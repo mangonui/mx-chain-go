@@ -948,7 +948,7 @@ func TestApplyDRWASyncEnvelopeRecoveryAdminFullPath(t *testing.T) {
 		RecoveryScope:        []string{"T1"},
 	}
 
-	result, err := applyDRWASyncEnvelope(adapter, envelope, 16, []byte("recovery_admin"))
+	result, err := applyDRWASyncEnvelope(adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerRecoveryAdmin))
 	require.NoError(t, err)
 	require.Equal(t, 1, result.AppliedOperations)
 	require.Equal(t, uint64(10000), adapter.lastBlocks["T1"])
@@ -962,6 +962,7 @@ func TestApplyDRWASyncOperationHolderProfile(t *testing.T) {
 	adapter := newMockDRWASyncStateAdapter()
 	err := applyDRWASyncOperation(adapter, drwaSyncOperation{
 		OperationType: drwaSyncOpHolderProfile,
+		TokenID:       "PROFILE-1",
 		Holder:        "h1",
 		Version:       1,
 		Body:          []byte(`{}`),
@@ -1029,7 +1030,7 @@ func TestValidateDRWARolloutManifestAllStages(t *testing.T) {
 	// Denial mismatch exceeded
 	require.Error(t, validateDRWARolloutManifest(&drwaRolloutManifest{
 		TokenID: "T1", Issuer: "issuer", Stage: drwaRolloutStageCanary,
-		MaxDenialMismatchCount: 999,
+		MaxDenialMismatchRateBps: 999,
 	}))
 }
 
@@ -1095,7 +1096,7 @@ func TestInspectDRWARolloutPreflightWithThresholds(t *testing.T) {
 		ExpectedPolicyVersion: 1,
 		MaxSyncFailureRateBps: 50,
 		MaxAPIErrorRateBps:    30,
-		MaxDenialMismatchCount: 5,
+		MaxDenialMismatchRateBps: 5,
 	}
 	report, err := inspectDRWARolloutPreflight(adapter, manifest, nil)
 	require.NoError(t, err)
@@ -1122,7 +1123,7 @@ func TestApplyDRWASyncEnvelopeRecoveryScopeRequired(t *testing.T) {
 		// No RecoveryScope — should fail
 	}
 
-	_, err := applyDRWASyncEnvelope(adapter, envelope, 16, []byte("recovery_admin"))
+	_, err := applyDRWASyncEnvelope(adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerRecoveryAdmin))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), drwaSyncRejectRecoveryScopeRequired)
 }
@@ -1142,7 +1143,7 @@ func TestApplyDRWASyncEnvelopeRecoveryScopeViolation(t *testing.T) {
 		RecoveryScope: []string{"OTHER-TOKEN"}, // T1 not in scope
 	}
 
-	_, err := applyDRWASyncEnvelope(adapter, envelope, 16, []byte("recovery_admin"))
+	_, err := applyDRWASyncEnvelope(adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerRecoveryAdmin))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), drwaSyncRejectRecoveryScopeViolation)
 }

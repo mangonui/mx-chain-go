@@ -27,6 +27,7 @@ var (
 	errDRWARolloutReportTokenMismatch  = errors.New("DRWA rollout report token mismatch")
 	errDRWARolloutReportStageMismatch  = errors.New("DRWA rollout report stage mismatch")
 	errDRWAInvalidRolloutThresholds    = errors.New("invalid DRWA rollout thresholds")
+	errDRWALegacyDenialMismatchCountThreshold = errors.New("legacy DRWA denial mismatch count threshold is no longer supported")
 	errDRWARolloutStageNotMonotonic    = errors.New("DRWA rollout stage must progress monotonically: canary → limited → production")
 )
 
@@ -47,7 +48,7 @@ const (
 type drwaRolloutThresholdConfig struct {
 	MaxFailureRateBpsUpperBound  uint64 `json:"max_failure_rate_bps_upper_bound"`
 	MaxAPIErrorRateBpsUpperBound uint64 `json:"max_api_error_rate_bps_upper_bound"`
-	MaxDenialMismatchUpperBound  uint64 `json:"max_denial_mismatch_upper_bound"`
+	MaxDenialMismatchRateBpsUpperBound uint64 `json:"max_denial_mismatch_rate_bps_upper_bound"`
 }
 
 // drwaRolloutDefaultThresholdConfig returns the built-in defaults, used when
@@ -57,7 +58,7 @@ func drwaRolloutDefaultThresholdConfig() drwaRolloutThresholdConfig {
 	return drwaRolloutThresholdConfig{
 		MaxFailureRateBpsUpperBound:  100,
 		MaxAPIErrorRateBpsUpperBound: 100,
-		MaxDenialMismatchUpperBound:  10,
+		MaxDenialMismatchRateBpsUpperBound: 100,
 	}
 }
 
@@ -76,7 +77,26 @@ type drwaRolloutManifest struct {
 	AllowSafeModeRollout   bool     `json:"allow_safe_mode_rollout"`
 	MaxSyncFailureRateBps  uint64   `json:"max_sync_failure_rate_bps"`
 	MaxAPIErrorRateBps     uint64   `json:"max_api_error_rate_bps"`
-	MaxDenialMismatchCount uint64   `json:"max_denial_mismatch_count"`
+	MaxDenialMismatchRateBps uint64 `json:"max_denial_mismatch_rate_bps"`
+}
+
+func (m *drwaRolloutManifest) UnmarshalJSON(data []byte) error {
+	type alias drwaRolloutManifest
+	var decoded alias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if _, hasLegacyField := raw["max_denial_mismatch_count"]; hasLegacyField {
+		return errDRWALegacyDenialMismatchCountThreshold
+	}
+
+	*m = drwaRolloutManifest(decoded)
+	return nil
 }
 
 type drwaRolloutStateReader interface {
@@ -98,6 +118,7 @@ type drwaRolloutObservedMetrics struct {
 	SyncFailureRateBps  uint64 `json:"sync_failure_rate_bps"`
 	APIErrorRateBps     uint64 `json:"api_error_rate_bps"`
 	DenialMismatchCount uint64 `json:"denial_mismatch_count"`
+	DenialComparisonsTotal uint64 `json:"denial_comparisons_total"`
 }
 
 type drwaRolloutVerificationReport struct {
@@ -130,6 +151,17 @@ func buildDRWARolloutStageKey(tokenID string) []byte {
 	return []byte("drwa:rollout:stage:" + tokenID)
 }
 
+func computeDRWADenialMismatchRateBps(mismatchCount, comparisonsTotal uint64) uint64 {
+	if comparisonsTotal == 0 {
+		return 0
+	}
+	if mismatchCount >= comparisonsTotal {
+		return 10000
+	}
+
+	return (mismatchCount * 10000) / comparisonsTotal
+}
+
 func validateDRWARolloutManifest(manifest *drwaRolloutManifest, thresholds ...drwaRolloutThresholdConfig) error {
 	if manifest == nil {
 		return errDRWANilRolloutManifest
@@ -155,7 +187,7 @@ func validateDRWARolloutManifest(manifest *drwaRolloutManifest, thresholds ...dr
 	// Only reject values exceeding the governance-configured upper bound cap.
 	if manifest.MaxSyncFailureRateBps > cfg.MaxFailureRateBpsUpperBound ||
 		manifest.MaxAPIErrorRateBps > cfg.MaxAPIErrorRateBpsUpperBound ||
-		manifest.MaxDenialMismatchCount > cfg.MaxDenialMismatchUpperBound {
+		manifest.MaxDenialMismatchRateBps > cfg.MaxDenialMismatchRateBpsUpperBound {
 		return errDRWAInvalidRolloutThresholds
 	}
 
@@ -219,8 +251,8 @@ func inspectDRWARolloutPreflight(reader drwaRolloutStateReader, manifest *drwaRo
 	if manifest.MaxAPIErrorRateBps > 0 {
 		report.Checks = append(report.Checks, fmt.Sprintf("api error threshold configured:%d", manifest.MaxAPIErrorRateBps))
 	}
-	if manifest.MaxDenialMismatchCount > 0 {
-		report.Checks = append(report.Checks, fmt.Sprintf("denial mismatch threshold configured:%d", manifest.MaxDenialMismatchCount))
+	if manifest.MaxDenialMismatchRateBps > 0 {
+		report.Checks = append(report.Checks, fmt.Sprintf("denial mismatch rate threshold configured:%d bps", manifest.MaxDenialMismatchRateBps))
 	}
 
 	switch manifest.Stage {
@@ -282,10 +314,11 @@ func buildDRWARolloutVerificationReport(manifest *drwaRolloutManifest, metrics *
 		report.FailedChecks = append(report.FailedChecks, fmt.Sprintf("api error rate exceeded: observed=%d threshold=%d", metrics.APIErrorRateBps, manifest.MaxAPIErrorRateBps))
 	}
 
-	if metrics.DenialMismatchCount <= manifest.MaxDenialMismatchCount {
-		report.PassedChecks = append(report.PassedChecks, "denial mismatch count within threshold")
+	observedDenialMismatchRateBps := computeDRWADenialMismatchRateBps(metrics.DenialMismatchCount, metrics.DenialComparisonsTotal)
+	if observedDenialMismatchRateBps <= manifest.MaxDenialMismatchRateBps {
+		report.PassedChecks = append(report.PassedChecks, fmt.Sprintf("denial mismatch rate within threshold: observed=%d threshold=%d", observedDenialMismatchRateBps, manifest.MaxDenialMismatchRateBps))
 	} else {
-		report.FailedChecks = append(report.FailedChecks, fmt.Sprintf("denial mismatch count exceeded: observed=%d threshold=%d", metrics.DenialMismatchCount, manifest.MaxDenialMismatchCount))
+		report.FailedChecks = append(report.FailedChecks, fmt.Sprintf("denial mismatch rate exceeded: observed=%d threshold=%d", observedDenialMismatchRateBps, manifest.MaxDenialMismatchRateBps))
 	}
 
 	sort.Strings(report.PassedChecks)

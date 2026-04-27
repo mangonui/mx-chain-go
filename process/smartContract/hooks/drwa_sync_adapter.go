@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/multiversx/mx-chain-core-go/core"
@@ -22,18 +23,40 @@ type drwaBlockNonceProvider interface {
 }
 
 type drwaHookStateAdapter struct {
-	accounts      state.AccountsAdapter
-	nonceProvider drwaBlockNonceProvider
+	accounts         state.AccountsAdapter
+	nonceProvider    drwaBlockNonceProvider
+	governanceEngine *DRWAGovernanceEngine
 }
+
+const (
+	drwaStoredValueBinaryV1       byte   = 0x01
+	drwaStoredValueNilBodyLength  uint32 = ^uint32(0)
+	drwaStoredValueBinaryHeaderLen       = 1 + 8 + 4
+)
 
 func newDRWAHookStateAdapter(accounts state.AccountsAdapter) (*drwaHookStateAdapter, error) {
 	if accounts == nil || accounts.IsInterfaceNil() {
 		return nil, ErrNilDRWAAccountsAdapter
 	}
 
+	governanceStore, err := newDRWAGovernanceTrieStore(accounts)
+	if err != nil {
+		return nil, err
+	}
+
 	return &drwaHookStateAdapter{
-		accounts: accounts,
+		accounts:         accounts,
+		governanceEngine: NewDRWAGovernanceEngine(governanceStore),
 	}, nil
+}
+
+func ProvisionDRWAAuthorizedCaller(accounts state.AccountsAdapter, domain string, address []byte, version uint64) error {
+	adapter, err := newDRWAHookStateAdapter(accounts)
+	if err != nil {
+		return err
+	}
+
+	return adapter.SetAuthorizedCallerAddressVersioned(domain, address, version)
 }
 
 // IsInterfaceNil returns true if there is no value under the interface
@@ -54,6 +77,7 @@ var buildDRWAHolderProfileKey = builtInFunctions.BuildDRWAHolderProfileKey
 var buildDRWAHolderAuditorAuthorizationKey = builtInFunctions.BuildDRWAHolderAuditorAuthorizationKey
 
 var buildDRWAAssetRecordKey = builtInFunctions.BuildDRWAAssetRecordKey
+var buildDRWAActiveKey = builtInFunctions.BuildDRWAActiveKey
 
 func buildDRWAAuthorizedCallerKey(domain string) []byte {
 	return []byte("drwa:auth:" + domain)
@@ -112,6 +136,15 @@ func (d *drwaHookStateAdapter) GetTokenPolicyVersion(tokenID string) (uint64, er
 	return storedValue.Version, nil
 }
 
+func (d *drwaHookStateAdapter) GetTokenPolicyStored(tokenID string) (*drwaSyncStoredValue, error) {
+	systemAccount, err := d.getUserAccount(core.SystemAccountAddress)
+	if err != nil {
+		return nil, err
+	}
+
+	return d.readStoredValue(systemAccount, buildDRWATokenPolicyKey([]byte(tokenID)))
+}
+
 func (d *drwaHookStateAdapter) GetAssetRecordVersion(tokenID string) (uint64, error) {
 	systemAccount, err := d.getUserAccount(core.SystemAccountAddress)
 	if err != nil {
@@ -138,6 +171,15 @@ func (d *drwaHookStateAdapter) GetHolderMirrorVersion(tokenID, holder string) (u
 	}
 
 	return storedValue.Version, nil
+}
+
+func (d *drwaHookStateAdapter) GetHolderMirrorStored(tokenID, holder string) (*drwaSyncStoredValue, error) {
+	holderAccount, err := d.getUserAccount([]byte(holder))
+	if err != nil {
+		return nil, err
+	}
+
+	return d.readStoredValue(holderAccount, buildDRWAHolderMirrorKey([]byte(tokenID), []byte(holder)))
 }
 
 func (d *drwaHookStateAdapter) GetHolderProfileVersion(holder string) (uint64, error) {
@@ -174,7 +216,7 @@ func (d *drwaHookStateAdapter) GetAuthorizedCallerAddress(domain string) ([]byte
 		return nil, err
 	}
 
-	value, _, err := systemAccount.AccountDataHandler().RetrieveValue(buildDRWAAuthorizedCallerKey(domain))
+	value, _, err := d.retrieveValueAllowingFreshNilTrie(systemAccount, buildDRWAAuthorizedCallerKey(domain))
 	if err != nil {
 		return nil, err
 	}
@@ -182,7 +224,34 @@ func (d *drwaHookStateAdapter) GetAuthorizedCallerAddress(domain string) ([]byte
 		return nil, nil
 	}
 
+	record := &drwaAuthorizedCallerRecord{}
+	if err = json.Unmarshal(value, record); err == nil && len(record.Address) > 0 {
+		return append([]byte(nil), record.Address...), nil
+	}
+
 	return append([]byte(nil), value...), nil
+}
+
+func (d *drwaHookStateAdapter) GetAuthorizedCallerAddressVersioned(domain string) ([]byte, uint64, error) {
+	systemAccount, err := d.getUserAccount(core.SystemAccountAddress)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	value, _, err := d.retrieveValueAllowingFreshNilTrie(systemAccount, buildDRWAAuthorizedCallerKey(domain))
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(value) == 0 {
+		return nil, 0, nil
+	}
+
+	record := &drwaAuthorizedCallerRecord{}
+	if err = json.Unmarshal(value, record); err == nil && len(record.Address) > 0 {
+		return append([]byte(nil), record.Address...), record.Version, nil
+	}
+
+	return append([]byte(nil), value...), 0, nil
 }
 
 func (d *drwaHookStateAdapter) PutAuthorizedCallerAddress(domain string, address []byte) error {
@@ -197,6 +266,49 @@ func (d *drwaHookStateAdapter) PutAuthorizedCallerAddress(domain string, address
 	}
 
 	return d.accounts.SaveAccount(systemAccount)
+}
+
+func (d *drwaHookStateAdapter) SetDRWAActive(tokenID string) error {
+	systemAccount, err := d.getUserAccount(core.SystemAccountAddress)
+	if err != nil {
+		return err
+	}
+
+	err = systemAccount.AccountDataHandler().SaveKeyValue(buildDRWAActiveKey([]byte(tokenID)), []byte{1})
+	if err != nil {
+		return err
+	}
+
+	return d.accounts.SaveAccount(systemAccount)
+}
+
+func (d *drwaHookStateAdapter) SetAuthorizedCallerAddressVersioned(domain string, address []byte, version uint64) error {
+	systemAccount, err := d.getUserAccount(core.SystemAccountAddress)
+	if err != nil {
+		return err
+	}
+
+	payload, err := json.Marshal(&drwaAuthorizedCallerRecord{
+		Version: version,
+		Address: append([]byte(nil), address...),
+	})
+	if err != nil {
+		return err
+	}
+
+	if err = systemAccount.AccountDataHandler().SaveKeyValue(buildDRWAAuthorizedCallerKey(domain), payload); err != nil {
+		return err
+	}
+
+	return d.accounts.SaveAccount(systemAccount)
+}
+
+func (d *drwaHookStateAdapter) GetGovernanceEngine() *DRWAGovernanceEngine {
+	return d.governanceEngine
+}
+
+func (d *drwaHookStateAdapter) GetCurrentBlockNonceForGovernance() (uint64, error) {
+	return d.GetCurrentBlockNonce()
 }
 
 func (d *drwaHookStateAdapter) PutTokenPolicyBody(tokenID string, version uint64, body []byte) error {
@@ -260,17 +372,15 @@ func (d *drwaHookStateAdapter) DeleteHolderMirror(tokenID, holder string, versio
 		return err
 	}
 
-	// Write tombstone as JSON (same format as writeStoredValue) with nil body.
-	// Previous implementation wrote raw 8-byte big-endian which caused json.Unmarshal
-	// failures in readStoredValue, permanently blocking re-enrollment and recovery.
-	// The tombstone preserves the version so re-enrollment via version 1 is rejected
-	// by validateDRWASyncVersion (requires nextVersion == currentVersion + 1).
-	tombstonePayload, jsonErr := json.Marshal(&drwaSyncStoredValue{
+	// Write tombstone in the canonical stored-value wrapper with nil body.
+	// Previous implementations used raw 8-byte big-endian versions or JSON;
+	// readStoredValue remains backward-compatible with both older formats.
+	tombstonePayload, encodeErr := encodeDRWASyncStoredValue(&drwaSyncStoredValue{
 		Version: version,
 		Body:    nil,
 	})
-	if jsonErr != nil {
-		return jsonErr
+	if encodeErr != nil {
+		return encodeErr
 	}
 	err = holderAccount.AccountDataHandler().SaveKeyValue(buildDRWAHolderMirrorKey([]byte(tokenID), []byte(holder)), tombstonePayload)
 	if err != nil {
@@ -353,7 +463,7 @@ func (d *drwaHookStateAdapter) Rollback(snapshot int) error {
 }
 
 func (d *drwaHookStateAdapter) readStoredValue(account vmcommon.UserAccountHandler, key []byte) (*drwaSyncStoredValue, error) {
-	value, _, err := account.AccountDataHandler().RetrieveValue(key)
+	value, _, err := d.retrieveValueAllowingFreshNilTrie(account, key)
 	if err != nil {
 		return nil, err
 	}
@@ -361,25 +471,46 @@ func (d *drwaHookStateAdapter) readStoredValue(account vmcommon.UserAccountHandl
 		return nil, nil
 	}
 
+	// Backward-compat: handle legacy 8-byte binary tombstones written before
+	// wrapper formats were introduced. These are big-endian uint64 version
+	// with nil body.
+	if len(value) == 8 {
+		ver := uint64(value[0])<<56 | uint64(value[1])<<48 | uint64(value[2])<<40 |
+			uint64(value[3])<<32 | uint64(value[4])<<24 | uint64(value[5])<<16 |
+			uint64(value[6])<<8 | uint64(value[7])
+		return &drwaSyncStoredValue{Version: ver, Body: nil}, nil
+	}
+
+	if value[0] == drwaStoredValueBinaryV1 {
+		return decodeDRWASyncStoredValue(value)
+	}
+
 	storedValue := &drwaSyncStoredValue{}
 	err = json.Unmarshal(value, storedValue)
 	if err != nil {
-		// Backward-compat: handle legacy 8-byte binary tombstones written
-		// before the JSON tombstone fix. These are big-endian uint64 version with nil body.
-		if len(value) == 8 {
-			ver := uint64(value[0])<<56 | uint64(value[1])<<48 | uint64(value[2])<<40 |
-				uint64(value[3])<<32 | uint64(value[4])<<24 | uint64(value[5])<<16 |
-				uint64(value[6])<<8 | uint64(value[7])
-			return &drwaSyncStoredValue{Version: ver, Body: nil}, nil
-		}
 		return nil, err
 	}
 
 	return storedValue, nil
 }
 
+func (d *drwaHookStateAdapter) retrieveValueAllowingFreshNilTrie(account vmcommon.UserAccountHandler, key []byte) ([]byte, uint32, error) {
+	value, trieDepth, err := account.AccountDataHandler().RetrieveValue(key)
+	if err != nil {
+		// Fresh accounts and freshly provisioned system-account mirrors can
+		// legitimately have no materialized data trie yet. DRWA read paths treat
+		// that as "missing value" and let the first write materialize the trie.
+		if errors.Is(err, state.ErrNilTrie) {
+			return nil, 0, nil
+		}
+		return nil, trieDepth, err
+	}
+
+	return value, trieDepth, nil
+}
+
 func (d *drwaHookStateAdapter) writeStoredValue(account vmcommon.UserAccountHandler, key []byte, version uint64, body []byte) error {
-	payload, err := json.Marshal(&drwaSyncStoredValue{
+	payload, err := encodeDRWASyncStoredValue(&drwaSyncStoredValue{
 		Version: version,
 		Body:    body,
 	})
@@ -387,15 +518,66 @@ func (d *drwaHookStateAdapter) writeStoredValue(account vmcommon.UserAccountHand
 		return err
 	}
 
-	// F-006: Track JSON state write frequency for binary migration planning.
-	recordDRWAMetric(drwaMetricJSONStateWrite)
-
 	err = account.AccountDataHandler().SaveKeyValue(key, payload)
 	if err != nil {
 		return err
 	}
 
 	return d.accounts.SaveAccount(account)
+}
+
+func encodeDRWASyncStoredValue(stored *drwaSyncStoredValue) ([]byte, error) {
+	if stored == nil {
+		return nil, errors.New("nil DRWA stored value")
+	}
+	if len(stored.Body) > drwaSyncMaxFieldBytes {
+		return nil, fmt.Errorf("DRWA stored body exceeds %d bytes", drwaSyncMaxFieldBytes)
+	}
+
+	bodyLen := uint32(len(stored.Body))
+	if stored.Body == nil {
+		bodyLen = drwaStoredValueNilBodyLength
+	}
+
+	payload := make([]byte, drwaStoredValueBinaryHeaderLen+len(stored.Body))
+	payload[0] = drwaStoredValueBinaryV1
+	binary.BigEndian.PutUint64(payload[1:9], stored.Version)
+	binary.BigEndian.PutUint32(payload[9:13], bodyLen)
+	copy(payload[13:], stored.Body)
+
+	return payload, nil
+}
+
+func decodeDRWASyncStoredValue(value []byte) (*drwaSyncStoredValue, error) {
+	if len(value) < drwaStoredValueBinaryHeaderLen {
+		return nil, errors.New("DRWA stored value binary payload too short")
+	}
+	if value[0] != drwaStoredValueBinaryV1 {
+		return nil, fmt.Errorf("unsupported DRWA stored value format: %d", value[0])
+	}
+
+	version := binary.BigEndian.Uint64(value[1:9])
+	bodyLen := binary.BigEndian.Uint32(value[9:13])
+
+	if bodyLen == drwaStoredValueNilBodyLength {
+		if len(value) != drwaStoredValueBinaryHeaderLen {
+			return nil, errors.New("DRWA tombstone payload has trailing bytes")
+		}
+		return &drwaSyncStoredValue{Version: version, Body: nil}, nil
+	}
+
+	expectedLen := drwaStoredValueBinaryHeaderLen + int(bodyLen)
+	if len(value) != expectedLen {
+		return nil, fmt.Errorf("DRWA stored value length mismatch: expected=%d got=%d", expectedLen, len(value))
+	}
+
+	body := make([]byte, int(bodyLen))
+	copy(body, value[13:])
+
+	return &drwaSyncStoredValue{
+		Version: version,
+		Body:    body,
+	}, nil
 }
 
 // getUserAccount loads an account from the shard-local AccountsAdapter.
@@ -449,6 +631,14 @@ func (d *drwaHookStateAdapter) persistArtifact(
 
 	err = systemAccount.AccountDataHandler().SaveKeyValue(historyKey, payloadCopy)
 	if err != nil {
+		rollbackErr := systemAccount.AccountDataHandler().SaveKeyValue(latestKey, nil)
+		if rollbackErr != nil {
+			log.Warn("persistArtifact: failed to roll back latest key after history write failure",
+				"tokenID", tokenID,
+				"rollbackErr", rollbackErr,
+				"originalErr", err)
+		}
+
 		return err
 	}
 
@@ -465,7 +655,7 @@ func (d *drwaHookStateAdapter) GetRecoveryLastBlock(tokenID string) (uint64, err
 		return 0, err
 	}
 
-	value, _, err := systemAccount.AccountDataHandler().RetrieveValue(buildDRWARecoveryLastBlockKey(tokenID))
+	value, _, err := d.retrieveValueAllowingFreshNilTrie(systemAccount, buildDRWARecoveryLastBlockKey(tokenID))
 	if err != nil {
 		return 0, err
 	}
@@ -507,4 +697,3 @@ func (d *drwaHookStateAdapter) GetCurrentBlockNonce() (uint64, error) {
 	}
 	return d.nonceProvider.CurrentNonce(), nil
 }
-

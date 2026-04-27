@@ -6,6 +6,18 @@ import (
 	"sync"
 
 	"github.com/multiversx/mx-chain-go/common"
+	"github.com/multiversx/mx-chain-go/process/smartContract/hooks"
+	vmcommonBuiltInFunctions "github.com/multiversx/mx-chain-vm-common-go/builtInFunctions"
+)
+
+const (
+	drwaGatePrometheusPrefix = "erd_drwa_gate_"
+	drwaSyncPrometheusPrefix = "erd_drwa_sync_"
+)
+
+var (
+	drwaGateMetricsSnapshotProvider = vmcommonBuiltInFunctions.SnapshotDRWAGateMetrics
+	drwaSyncMetricsSnapshotProvider = hooks.SnapshotDRWASyncMetrics
 )
 
 // statusMetrics will handle displaying at /node/details all metrics already collected for other status handlers
@@ -190,8 +202,26 @@ func (sm *statusMetrics) StatusMetricsWithoutP2PPrometheusString() (string, erro
 	for key, value := range metrics {
 		sm.addPrometheusMetricToStringBuilder(&stringBuilder, shardID, key, value)
 	}
+	sm.addDRWAPrometheusMetrics(&stringBuilder, shardID)
 
 	return stringBuilder.String(), nil
+}
+
+func (sm *statusMetrics) addDRWAPrometheusMetrics(builder *strings.Builder, shardID uint64) {
+	appendSnapshotPrometheusMetrics(builder, shardID, drwaGatePrometheusPrefix, drwaGateMetricsSnapshotProvider())
+	appendSnapshotPrometheusMetrics(builder, shardID, drwaSyncPrometheusPrefix, drwaSyncMetricsSnapshotProvider())
+}
+
+func appendSnapshotPrometheusMetrics(builder *strings.Builder, shardID uint64, prefix string, metrics map[string]uint64) {
+	for key, value := range metrics {
+		sanitizedKey := sanitizePrometheusMetricKey(prefix + key)
+		builder.WriteString(fmt.Sprintf("%s{%s=\"%d\"} %d\n", sanitizedKey, common.MetricShardId, shardID, value))
+	}
+}
+
+func sanitizePrometheusMetricKey(metricKey string) string {
+	replacer := strings.NewReplacer("-", "_", ".", "_", " ", "_")
+	return replacer.Replace(metricKey)
 }
 
 func (sm *statusMetrics) addPrometheusMetricToStringBuilder(builder *strings.Builder, shardID uint64, key string, value interface{}) {

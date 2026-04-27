@@ -257,6 +257,39 @@ func TestTransactionSimulator_ProcessTxShouldIncludeScrsAndReceipts(t *testing.T
 	)
 }
 
+func TestTransactionSimulator_ProcessTxForwardsHeaderEpochToDataFieldParser(t *testing.T) {
+	t.Parallel()
+
+	var capturedEpoch uint32
+	args := getTxSimulatorArgs()
+	args.DataFieldParser = &testscommon.DataFieldParserStub{
+		ParseCalled: func(dataField []byte, sender, receiver []byte, numOfShards uint32, epoch uint32) *datafield.ResponseParseData {
+			capturedEpoch = epoch
+			return &datafield.ResponseParseData{}
+		},
+	}
+	args.IntermediateProcContainer = &mock.IntermProcessorContainerStub{
+		GetCalled: func(key block.Type) (process.IntermediateTransactionHandler, error) {
+			return &mock.IntermediateTransactionHandlerStub{
+				GetAllCurrentFinishedTxsCalled: func() map[string]data.TransactionHandler {
+					if key == block.SmartContractResultBlock {
+						return map[string]data.TransactionHandler{
+							"keySCr": &smartContractResult.SmartContractResult{},
+						}
+					}
+					return map[string]data.TransactionHandler{}
+				},
+			}, nil
+		},
+	}
+
+	ts, _ := NewTransactionSimulator(args)
+	header := &block.Header{Epoch: 17}
+	_, err := ts.ProcessTx(&transaction.Transaction{Nonce: 1}, header)
+	require.NoError(t, err)
+	require.Equal(t, uint32(17), capturedEpoch)
+}
+
 func getTxSimulatorArgs() ArgsTxSimulator {
 	pubKeyConverter := testscommon.NewPubkeyConverterMock(32)
 	dataFieldParser, _ := datafield.NewOperationDataFieldParser(&datafield.ArgsOperationDataFieldParser{

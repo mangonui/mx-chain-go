@@ -23,6 +23,13 @@ var drwaKeccakPool = sync.Pool{
 // binary hook payload produced by the Rust managedDRWASyncMirror call.
 const drwaBinaryHashSize = 32
 
+// drwaAuthorizedCallerAddressLen is the expected byte length of a
+// MultiversX authorized-caller address. Used by M-08 (AUD-014) to
+// structurally validate stored/caller addresses at runtime before the
+// bytes.Equal comparison in `isDRWASyncCallerAuthorized`, catching
+// malformed provisioning artifacts instead of silently deny-all.
+const drwaAuthorizedCallerAddressLen = 32
+
 type drwaSyncStateAdapter interface {
 	GetTokenPolicyVersion(tokenID string) (uint64, error)
 	GetAssetRecordVersion(tokenID string) (uint64, error)
@@ -30,11 +37,14 @@ type drwaSyncStateAdapter interface {
 	GetHolderProfileVersion(holder string) (uint64, error)
 	GetHolderAuditorAuthorizationVersion(tokenID, holder string) (uint64, error)
 	GetAuthorizedCallerAddress(domain string) ([]byte, error)
+	GetAuthorizedCallerAddressVersioned(domain string) ([]byte, uint64, error)
 	PutTokenPolicyBody(tokenID string, version uint64, body []byte) error
 	PutAssetRecordBody(tokenID string, version uint64, body []byte) error
 	PutHolderMirrorBody(tokenID, holder string, version uint64, body []byte) error
 	PutHolderProfileBody(holder string, version uint64, body []byte) error
 	PutHolderAuditorAuthorizationBody(tokenID, holder string, version uint64, body []byte) error
+	SetDRWAActive(tokenID string) error
+	SetAuthorizedCallerAddressVersioned(domain string, address []byte, version uint64) error
 	DeleteHolderMirror(tokenID, holder string, version uint64) error
 	Snapshot() int
 	Rollback(snapshot int) error
@@ -50,7 +60,7 @@ func decodeDRWASyncEnvelope(payload []byte) (*drwaSyncEnvelope, error) {
 	}
 
 	// Binary path: payload produced by the Rust managedDRWASyncMirror hook.
-	// Format: [32-byte keccak256 hash] || [canonical binary payload].
+	// Format: [32-byte keccak256 hash] || [schema_version:u16] || [canonical binary payload].
 	// Detected by the first byte not being '{' (JSON always starts with '{').
 	if payload[0] != '{' {
 		envelope, err := decodeDRWASyncEnvelopeBinary(payload)
@@ -88,7 +98,7 @@ func decodeDRWASyncEnvelope(payload []byte) (*drwaSyncEnvelope, error) {
 }
 
 func decodeDRWASyncEnvelopeBinary(payload []byte) (*drwaSyncEnvelope, error) {
-	if len(payload) < drwaBinaryHashSize+1 {
+	if len(payload) < drwaBinaryHashSize+3 {
 		return nil, errors.New("DRWA binary sync payload too short")
 	}
 
@@ -112,6 +122,16 @@ func parseDRWABinaryPayload(data []byte) (*drwaSyncEnvelope, error) {
 
 	r := bytes.NewReader(data)
 
+	var versionBuf [2]byte
+	if _, err := io.ReadFull(r, versionBuf[:]); err != nil {
+		return nil, fmt.Errorf("reading schema version: %w", err)
+	}
+	schemaVersion := binary.BigEndian.Uint16(versionBuf[:])
+	if schemaVersion != drwaSyncEnvelopeSchemaVersion &&
+		schemaVersion != drwaSyncEnvelopeSchemaVersionWithRecovery {
+		return nil, fmt.Errorf("unsupported DRWA binary sync schema version: %d", schemaVersion)
+	}
+
 	callerTagByte, err := r.ReadByte()
 	if err != nil {
 		return nil, fmt.Errorf("reading caller tag: %w", err)
@@ -119,6 +139,10 @@ func parseDRWABinaryPayload(data []byte) (*drwaSyncEnvelope, error) {
 	callerDomain, err := drwaCallerDomainFromTag(callerTagByte)
 	if err != nil {
 		return nil, err
+	}
+
+	if schemaVersion == drwaSyncEnvelopeSchemaVersionWithRecovery {
+		return parseDRWABinaryPayloadV2(r, schemaVersion, callerDomain)
 	}
 
 	var operations []drwaSyncOperation
@@ -135,8 +159,9 @@ func parseDRWABinaryPayload(data []byte) (*drwaSyncEnvelope, error) {
 	}
 
 	return &drwaSyncEnvelope{
-		CallerDomain: callerDomain,
-		Operations:   operations,
+		SchemaVersion: schemaVersion,
+		CallerDomain:  callerDomain,
+		Operations:    operations,
 	}, nil
 }
 
@@ -171,20 +196,36 @@ func readDRWABinaryOperation(r *bytes.Reader) (drwaSyncOperation, error) {
 		return drwaSyncOperation{}, fmt.Errorf("reading body: %w", err)
 	}
 
-	// SM-3: Validate tokenID after decoding from binary. Reject empty,
-	// oversized, or control-character-containing identifiers early.
-	if err = validateDRWASyncField(string(tokenIDBytes), drwaSyncMaxTokenIDLen); err != nil {
-		return drwaSyncOperation{}, fmt.Errorf("invalid token_id: %w", err)
+	// HolderProfile is the one canonical tokenless DRWA sync operation.
+	// Its Rust serializer intentionally emits a zero-length token_id field,
+	// and the Go side must preserve that contract to avoid rejecting valid
+	// identity-profile sync envelopes at runtime.
+	if opType != drwaSyncOpHolderProfile &&
+		opType != drwaSyncOpGovernanceApprove &&
+		opType != drwaSyncOpGovernanceExecute {
+		// SM-3: Validate tokenID after decoding from binary. Reject empty,
+		// oversized, or control-character-containing identifiers early.
+		if err = validateDRWASyncField(string(tokenIDBytes), drwaSyncMaxTokenIDLen); err != nil {
+			return drwaSyncOperation{}, fmt.Errorf("invalid token_id: %w", err)
+		}
 	}
 
-	// For token_policy and asset_record the holder field is 32 zero bytes
+	// For token_policy, asset_record, and authorized_caller_update the holder
+	// field is 32 zero bytes
 	// (canonical placeholder). Represent as empty string in-memory, matching
 	// JSON behaviour and the encoder in drwaSerializedHolder.
 	holder := ""
-	if opType != drwaSyncOpTokenPolicy && opType != drwaSyncOpAssetRecord {
+	if opType != drwaSyncOpTokenPolicy &&
+		opType != drwaSyncOpAssetRecord &&
+		opType != drwaSyncOpAuthorizedCallerUpdate &&
+		opType != drwaSyncOpGovernanceApprove &&
+		opType != drwaSyncOpGovernanceExecute {
 		holder = string(holderBytes)
-		// SM-3: Validate holder address from binary payload.
-		if err = validateDRWASyncField(holder, drwaSyncMaxHolderLen); err != nil {
+		// Binary holder fields carry raw address bytes, not printable text.
+		// Real ManagedAddress payloads can contain 0x00 and other low bytes,
+		// so the binary path must validate holder length without applying the
+		// textual control-character rules used for token identifiers.
+		if err = validateDRWABinaryHolderField(holderBytes, drwaSyncMaxHolderLen); err != nil {
 			return drwaSyncOperation{}, fmt.Errorf("invalid holder: %w", err)
 		}
 	}
@@ -212,6 +253,16 @@ func validateDRWASyncField(s string, maxLen int) error {
 		if b == 0 || b < 0x20 {
 			return fmt.Errorf("field contains control character: 0x%02x", b)
 		}
+	}
+	return nil
+}
+
+func validateDRWABinaryHolderField(holder []byte, maxLen int) error {
+	if len(holder) == 0 {
+		return fmt.Errorf("empty field")
+	}
+	if len(holder) > maxLen {
+		return fmt.Errorf("field too long: %d > %d", len(holder), maxLen)
 	}
 	return nil
 }
@@ -255,9 +306,68 @@ func drwaCallerDomainFromTag(tag byte) (string, error) {
 		return drwaSyncCallerAttestation, nil
 	case 4:
 		return drwaSyncCallerRecoveryAdmin, nil
+	case 5:
+		return drwaSyncCallerAuthAdmin, nil
 	default:
 		return "", fmt.Errorf("unknown DRWA caller domain tag: %d", tag)
 	}
+}
+
+func parseDRWABinaryPayloadV2(
+	r *bytes.Reader,
+	schemaVersion uint16,
+	callerDomain string,
+) (*drwaSyncEnvelope, error) {
+	preRecoveryStateHash, err := readDRWABinaryLenPrefixed(r)
+	if err != nil {
+		return nil, fmt.Errorf("reading pre_recovery_state_hash: %w", err)
+	}
+
+	var scopeCountBuf [2]byte
+	if _, err = io.ReadFull(r, scopeCountBuf[:]); err != nil {
+		return nil, fmt.Errorf("reading recovery scope count: %w", err)
+	}
+	scopeCount := int(binary.BigEndian.Uint16(scopeCountBuf[:]))
+	recoveryScope := make([]string, 0, scopeCount)
+	for idx := 0; idx < scopeCount; idx++ {
+		scopeValue, readErr := readDRWABinaryLenPrefixed(r)
+		if readErr != nil {
+			return nil, fmt.Errorf("reading recovery scope %d: %w", idx, readErr)
+		}
+		if err = validateDRWASyncField(string(scopeValue), drwaSyncMaxTokenIDLen); err != nil {
+			return nil, fmt.Errorf("invalid recovery scope %d: %w", idx, err)
+		}
+		recoveryScope = append(recoveryScope, string(scopeValue))
+	}
+
+	var opCountBuf [2]byte
+	if _, err = io.ReadFull(r, opCountBuf[:]); err != nil {
+		return nil, fmt.Errorf("reading operation count: %w", err)
+	}
+	opCount := int(binary.BigEndian.Uint16(opCountBuf[:]))
+	if opCount > drwaSyncMaxOperations {
+		return nil, fmt.Errorf("DRWA binary payload exceeds %d operations", drwaSyncMaxOperations)
+	}
+
+	operations := make([]drwaSyncOperation, 0, opCount)
+	for idx := 0; idx < opCount; idx++ {
+		op, readErr := readDRWABinaryOperation(r)
+		if readErr != nil {
+			return nil, fmt.Errorf("reading operation %d: %w", idx, readErr)
+		}
+		operations = append(operations, op)
+	}
+	if r.Len() != 0 {
+		return nil, fmt.Errorf("DRWA binary payload has %d trailing bytes", r.Len())
+	}
+
+	return &drwaSyncEnvelope{
+		SchemaVersion:        schemaVersion,
+		CallerDomain:         callerDomain,
+		Operations:           operations,
+		PreRecoveryStateHash: preRecoveryStateHash,
+		RecoveryScope:        recoveryScope,
+	}, nil
 }
 
 func drwaOperationTypeFromTag(tag byte) (drwaSyncOperationType, error) {
@@ -274,6 +384,12 @@ func drwaOperationTypeFromTag(tag byte) (drwaSyncOperationType, error) {
 		return drwaSyncOpHolderAuditorAuth, nil
 	case 5:
 		return drwaSyncOpHolderMirrorDelete, nil
+	case 6:
+		return drwaSyncOpAuthorizedCallerUpdate, nil
+	case 7:
+		return drwaSyncOpGovernanceApprove, nil
+	case 8:
+		return drwaSyncOpGovernanceExecute, nil
 	default:
 		return "", fmt.Errorf("unknown DRWA operation type tag: %d", tag)
 	}
@@ -344,8 +460,8 @@ func applyDRWASyncEnvelopeInternal(
 
 		// When the caller is recovery_admin, check if governance is enabled
 		// for the token. If so, create a proposal instead of applying the
-		// envelope directly. Backward compatible: no governance config means
-		// single-key recovery still works (with a warning metric).
+		// envelope directly. If governance cannot handle the envelope, reject
+		// instead of falling back to single-key recovery.
 		if envelope.CallerDomain == drwaSyncCallerRecoveryAdmin {
 			result, handled, govErr := maybeRouteToGovernance(adapter, envelope, callerAddress)
 			if govErr != nil {
@@ -355,8 +471,11 @@ func applyDRWASyncEnvelopeInternal(
 			if handled {
 				return result, nil
 			}
-			// Not handled = governance not configured; fall through to single-key path.
-			recordDRWAMetric("governance_bypass_single_key_recovery")
+			if _, governanceCapable := adapter.(drwaSyncGovernanceProvider); governanceCapable {
+				recordDRWAMetric(drwaMetricSyncApplyFailure)
+				recordDRWAMetric(drwaMetricRecoveryGovernanceRequired)
+				return nil, errDRWARecoveryGovernanceRequired
+			}
 		}
 	}
 
@@ -485,15 +604,46 @@ func applyDRWASyncEnvelopeInternal(
 }
 
 func applyDRWASyncOperation(adapter drwaSyncStateAdapter, operation drwaSyncOperation) error {
+	if operation.OperationType == drwaSyncOpAuthorizedCallerUpdate {
+		if err := validateDRWASyncField(operation.TokenID, drwaSyncMaxTokenIDLen); err != nil {
+			return fmt.Errorf("invalid authorized caller domain in operation: %w", err)
+		}
+		normalizedAddress, err := NormalizeDRWAAuthorizedCallerAddress(string(operation.Body))
+		if err != nil {
+			return err
+		}
+		_, currentVersion, err := adapter.GetAuthorizedCallerAddressVersioned(operation.TokenID)
+		if err != nil {
+			return err
+		}
+		if err = validateDRWASyncVersion(currentVersion, operation.Version); err != nil {
+			return err
+		}
+
+		return adapter.SetAuthorizedCallerAddressVersioned(operation.TokenID, normalizedAddress, operation.Version)
+	}
+
 	// SM-3: Validate operation fields regardless of decode path (JSON or binary).
 	// Binary decode validates during parsing; this ensures JSON-decoded operations
 	// also have validated fields before storage key construction.
-	if err := validateDRWASyncField(operation.TokenID, drwaSyncMaxTokenIDLen); err != nil {
-		return fmt.Errorf("invalid TokenID in operation: %w", err)
+	if operation.OperationType != drwaSyncOpHolderProfile {
+		if err := validateDRWASyncField(operation.TokenID, drwaSyncMaxTokenIDLen); err != nil {
+			return fmt.Errorf("invalid TokenID in operation: %w", err)
+		}
 	}
 	if operation.Holder != "" {
-		if err := validateDRWASyncField(operation.Holder, drwaSyncMaxHolderLen); err != nil {
-			return fmt.Errorf("invalid Holder in operation: %w", err)
+		switch operation.OperationType {
+		case drwaSyncOpHolderMirror,
+			drwaSyncOpHolderProfile,
+			drwaSyncOpHolderAuditorAuth,
+			drwaSyncOpHolderMirrorDelete:
+			if err := validateDRWABinaryHolderField([]byte(operation.Holder), drwaSyncMaxHolderLen); err != nil {
+				return fmt.Errorf("invalid Holder in operation: %w", err)
+			}
+		default:
+			if err := validateDRWASyncField(operation.Holder, drwaSyncMaxHolderLen); err != nil {
+				return fmt.Errorf("invalid Holder in operation: %w", err)
+			}
 		}
 	}
 
@@ -501,69 +651,100 @@ func applyDRWASyncOperation(adapter drwaSyncStateAdapter, operation drwaSyncOper
 	case drwaSyncOpTokenPolicy:
 		currentVersion, err := adapter.GetTokenPolicyVersion(operation.TokenID)
 		if err != nil {
-			return err
+			return fmt.Errorf("DRWA token policy version read failed for %q: %w", operation.TokenID, err)
 		}
 		err = validateDRWASyncVersion(currentVersion, operation.Version)
 		if err != nil {
 			return err
 		}
+		err = adapter.PutTokenPolicyBody(operation.TokenID, operation.Version, operation.Body)
+		if err != nil {
+			return fmt.Errorf("DRWA token policy write failed for %q: %w", operation.TokenID, err)
+		}
+		if currentVersion == 0 {
+			err = adapter.SetDRWAActive(operation.TokenID)
+			if err != nil {
+				return fmt.Errorf("DRWA active-flag write failed for %q: %w", operation.TokenID, err)
+			}
+			return nil
+		}
 
-		return adapter.PutTokenPolicyBody(operation.TokenID, operation.Version, operation.Body)
+		return nil
 	case drwaSyncOpAssetRecord:
 		currentVersion, err := adapter.GetAssetRecordVersion(operation.TokenID)
 		if err != nil {
-			return err
+			return fmt.Errorf("DRWA asset record version read failed for %q: %w", operation.TokenID, err)
 		}
 		err = validateDRWASyncVersion(currentVersion, operation.Version)
 		if err != nil {
 			return err
 		}
 
-		return adapter.PutAssetRecordBody(operation.TokenID, operation.Version, operation.Body)
+		err = adapter.PutAssetRecordBody(operation.TokenID, operation.Version, operation.Body)
+		if err != nil {
+			return fmt.Errorf("DRWA asset record write failed for %q: %w", operation.TokenID, err)
+		}
+		return nil
 	case drwaSyncOpHolderMirror:
 		currentVersion, err := adapter.GetHolderMirrorVersion(operation.TokenID, operation.Holder)
 		if err != nil {
-			return err
+			return fmt.Errorf("DRWA holder mirror version read failed for token %q holder %x: %w", operation.TokenID, []byte(operation.Holder), err)
 		}
 		err = validateDRWASyncVersion(currentVersion, operation.Version)
 		if err != nil {
 			return err
 		}
 
-		return adapter.PutHolderMirrorBody(operation.TokenID, operation.Holder, operation.Version, operation.Body)
+		err = adapter.PutHolderMirrorBody(operation.TokenID, operation.Holder, operation.Version, operation.Body)
+		if err != nil {
+			return fmt.Errorf("DRWA holder mirror write failed for token %q holder %x: %w", operation.TokenID, []byte(operation.Holder), err)
+		}
+		return nil
 	case drwaSyncOpHolderProfile:
 		currentVersion, err := adapter.GetHolderProfileVersion(operation.Holder)
 		if err != nil {
-			return err
+			return fmt.Errorf("DRWA holder profile version read failed for holder %x: %w", []byte(operation.Holder), err)
 		}
 		err = validateDRWASyncVersion(currentVersion, operation.Version)
 		if err != nil {
 			return err
 		}
 
-		return adapter.PutHolderProfileBody(operation.Holder, operation.Version, operation.Body)
+		err = adapter.PutHolderProfileBody(operation.Holder, operation.Version, operation.Body)
+		if err != nil {
+			return fmt.Errorf("DRWA holder profile write failed for holder %x: %w", []byte(operation.Holder), err)
+		}
+		return nil
 	case drwaSyncOpHolderAuditorAuth:
 		currentVersion, err := adapter.GetHolderAuditorAuthorizationVersion(operation.TokenID, operation.Holder)
 		if err != nil {
-			return err
+			return fmt.Errorf("DRWA holder auditor-auth version read failed for token %q holder %x: %w", operation.TokenID, []byte(operation.Holder), err)
 		}
 		err = validateDRWASyncVersion(currentVersion, operation.Version)
 		if err != nil {
 			return err
 		}
 
-		return adapter.PutHolderAuditorAuthorizationBody(operation.TokenID, operation.Holder, operation.Version, operation.Body)
+		err = adapter.PutHolderAuditorAuthorizationBody(operation.TokenID, operation.Holder, operation.Version, operation.Body)
+		if err != nil {
+			return fmt.Errorf("DRWA holder auditor-auth write failed for token %q holder %x: %w", operation.TokenID, []byte(operation.Holder), err)
+		}
+		return nil
 	case drwaSyncOpHolderMirrorDelete:
 		currentVersion, err := adapter.GetHolderMirrorVersion(operation.TokenID, operation.Holder)
 		if err != nil {
-			return err
+			return fmt.Errorf("DRWA holder mirror delete version read failed for token %q holder %x: %w", operation.TokenID, []byte(operation.Holder), err)
 		}
 		err = validateDRWASyncVersion(currentVersion, operation.Version)
 		if err != nil {
 			return err
 		}
 
-		return adapter.DeleteHolderMirror(operation.TokenID, operation.Holder, operation.Version)
+		err = adapter.DeleteHolderMirror(operation.TokenID, operation.Holder, operation.Version)
+		if err != nil {
+			return fmt.Errorf("DRWA holder mirror delete failed for token %q holder %x: %w", operation.TokenID, []byte(operation.Holder), err)
+		}
+		return nil
 	default:
 		return fmt.Errorf("unknown DRWA sync operation type: %s", operation.OperationType)
 	}
@@ -611,13 +792,9 @@ func isDRWASyncCallerAuthorized(
 	// call site in applyDRWASyncEnvelopeInternal). The two layers are gated by
 	// the optional drwaSyncGovernanceProvider interface.
 	//
-	// PRODUCTION STATE — KNOWN GAP (audit finding N5): the production
-	// drwaHookStateAdapter constructed in BlockChainHookImpl.ApplyDRWASyncEnvelopeBytes
-	// does NOT implement drwaSyncGovernanceProvider, so in the runtime path
-	// visible in this repo every recovery_admin envelope falls through to
-	// single-key authorization with the governance_bypass_single_key_recovery
-	// metric. Activating M-of-N for production requires wiring the engine into
-	// the adapter (see audit memo F5).
+	// PRODUCTION STATE: drwaHookStateAdapter implements
+	// drwaSyncGovernanceProvider, so recovery_admin envelopes either route
+	// through governance or fail closed with DRWA_SYNC_GOVERNANCE_REQUIRED.
 	if len(callerAddress) == 0 {
 		return false
 	}
@@ -681,6 +858,13 @@ func isDRWASyncCallerAuthorized(
 			}
 		}
 		validOperations = true
+	case drwaSyncCallerAuthAdmin:
+		for _, operation := range operations {
+			if operation.OperationType != drwaSyncOpAuthorizedCallerUpdate {
+				return false
+			}
+		}
+		validOperations = true
 	default:
 		return false
 	}
@@ -693,6 +877,24 @@ func isDRWASyncCallerAuthorized(
 	// or missing configuration), deny the operation. This is intentional — a
 	// transient read failure must never grant unauthorized access.
 	if err != nil || len(expectedAddress) == 0 {
+		return false
+	}
+
+	// M-08 (AUD-014): runtime structural validation. `bytes.Equal` silently
+	// treats a length mismatch as "not equal" — which is safe, but it
+	// masks provisioning bugs (truncated migration manifest, accidental
+	// bech32 payload write, short-read from storage) as routine caller
+	// rejections. We detect length mismatches explicitly and count them
+	// on a dedicated metric so operators can distinguish "caller is wrong"
+	// from "stored expected address is corrupt."
+	//
+	// Additionally, production MultiversX addresses are always
+	// `drwaAuthorizedCallerAddressLen` (32) bytes. If either side deviates
+	// from that length while being non-empty, the provisioning record is
+	// malformed and authorization must fail closed.
+	if len(expectedAddress) != len(callerAddress) ||
+		len(expectedAddress) != drwaAuthorizedCallerAddressLen {
+		recordDRWAMetric(drwaMetricAuthorizedCallerMalformed)
 		return false
 	}
 
@@ -744,6 +946,9 @@ func serializeDRWASyncEnvelopePayload(callerDomain string, operations []drwaSync
 		return nil, err
 	}
 
+	versionBytes := make([]byte, 2)
+	binary.BigEndian.PutUint16(versionBytes, drwaSyncEnvelopeSchemaVersion)
+	payload.Write(versionBytes)
 	payload.WriteByte(callerTag)
 	for _, operation := range operations {
 		opTag, err := drwaOperationTypeTag(operation.OperationType)
@@ -776,6 +981,8 @@ func drwaCallerDomainTag(callerDomain string) (byte, error) {
 		return 3, nil
 	case drwaSyncCallerRecoveryAdmin:
 		return 4, nil
+	case drwaSyncCallerAuthAdmin:
+		return 5, nil
 	default:
 		return 0, fmt.Errorf("unknown DRWA sync caller domain: %s", callerDomain)
 	}
@@ -793,6 +1000,12 @@ func drwaOperationTypeTag(operationType drwaSyncOperationType) (byte, error) {
 		return 4, nil
 	case drwaSyncOpHolderMirrorDelete:
 		return 5, nil
+	case drwaSyncOpAuthorizedCallerUpdate:
+		return 6, nil
+	case drwaSyncOpGovernanceApprove:
+		return 7, nil
+	case drwaSyncOpGovernanceExecute:
+		return 8, nil
 	case drwaSyncOpAssetRecord:
 		return 1, nil
 	default:
@@ -801,7 +1014,11 @@ func drwaOperationTypeTag(operationType drwaSyncOperationType) (byte, error) {
 }
 
 func drwaSerializedHolder(operation drwaSyncOperation) []byte {
-	if operation.OperationType == drwaSyncOpTokenPolicy || operation.OperationType == drwaSyncOpAssetRecord {
+	if operation.OperationType == drwaSyncOpTokenPolicy ||
+		operation.OperationType == drwaSyncOpAssetRecord ||
+		operation.OperationType == drwaSyncOpAuthorizedCallerUpdate ||
+		operation.OperationType == drwaSyncOpGovernanceApprove ||
+		operation.OperationType == drwaSyncOpGovernanceExecute {
 		return make([]byte, 32)
 	}
 
@@ -838,6 +1055,8 @@ type drwaSyncRecoveryTimelockProvider interface {
 // drwaSyncRecoveryTimelockProvider. Prevents silent regression if the
 // interface changes or the adapter implementation is removed.
 var _ drwaSyncRecoveryTimelockProvider = (*drwaHookStateAdapter)(nil)
+var _ drwaSyncGovernanceProvider = (*drwaHookStateAdapter)(nil)
+var _ drwaMigrationStateReader = (*drwaHookStateAdapter)(nil)
 
 // buildDRWARecoveryLastBlockKey returns the system account key that stores the
 // block nonce of the last recovery_admin write for a given token.
@@ -943,6 +1162,7 @@ func verifyDRWAPreRecoveryStateHash(adapter drwaSyncStateAdapter, envelope *drwa
 	reader, ok := adapter.(drwaMigrationStateReader)
 	if !ok {
 		// Adapter does not support stored-value reads (test mock) — skip check.
+		recordDRWAMetric(drwaMetricRecoveryStateHashSkipped)
 		return nil
 	}
 

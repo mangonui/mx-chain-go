@@ -92,7 +92,7 @@ func (h *drwaSimulatorHarness) syncTokenPolicy(t *testing.T, tokenID string, ver
 		t.Fatalf("syncTokenPolicy hash: %v", err)
 	}
 	envelope.PayloadHash = hash
-	if _, err = applyDRWASyncEnvelope(h.adapter, envelope, 16, []byte("policy_registry")); err != nil {
+	if _, err = applyDRWASyncEnvelope(h.adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerPolicyRegistry)); err != nil {
 		t.Fatalf("syncTokenPolicy apply: %v", err)
 	}
 }
@@ -115,9 +115,29 @@ func (h *drwaSimulatorHarness) syncHolderMirror(t *testing.T, tokenID, holder st
 		t.Fatalf("syncHolderMirror hash: %v", err)
 	}
 	envelope.PayloadHash = hash
-	if _, err = applyDRWASyncEnvelope(h.adapter, envelope, 16, []byte("asset_manager")); err != nil {
+	if _, err = applyDRWASyncEnvelope(h.adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerAssetManager)); err != nil {
 		t.Fatalf("syncHolderMirror apply: %v", err)
 	}
+}
+
+func (h *drwaSimulatorHarness) applyEncodedPayload(t *testing.T, callerDomain string, operations []drwaSyncOperation, callerAddress []byte) error {
+	t.Helper()
+
+	payload, err := serializeDRWASyncEnvelopePayload(callerDomain, operations)
+	if err != nil {
+		t.Fatalf("serializeDRWASyncEnvelopePayload: %v", err)
+	}
+	hash, err := computeDRWASyncHash(callerDomain, operations)
+	if err != nil {
+		t.Fatalf("computeDRWASyncHash: %v", err)
+	}
+	hookPayload := append(append([]byte(nil), hash...), payload...)
+	envelope, err := decodeDRWASyncEnvelope(hookPayload)
+	if err != nil {
+		return err
+	}
+	_, err = applyDRWASyncEnvelope(h.adapter, envelope, 16, callerAddress)
+	return err
 }
 
 // evaluateTransfer reads mirror state and runs the gate decision.
@@ -250,5 +270,42 @@ func TestDRWAScenarioMirrorVersionMonotonic(t *testing.T) {
 	}
 	if v != 2 {
 		t.Fatalf("expected holder version 2, got %d", v)
+	}
+}
+
+// TestDRWAScenarioEncodedSyncEnvelopeHappyPath proves that the encoded binary
+// sync envelope path updates the native mirror successfully for a basic token
+// policy sync.
+func TestDRWAScenarioEncodedSyncEnvelopeHappyPath(t *testing.T) {
+	const tokenID = "RESTATE-6"
+
+	h := newDRWASimulatorHarness()
+	err := h.applyEncodedPayload(t, drwaSyncCallerPolicyRegistry, []drwaSyncOperation{{
+		OperationType: drwaSyncOpTokenPolicy,
+		TokenID:       tokenID,
+		Version:       1,
+		Body:          []byte(`{"drwa_enabled":true,"global_pause":false}`),
+	}}, testDRWACallerAddress(drwaSyncCallerPolicyRegistry))
+	if err != nil {
+		t.Fatalf("expected encoded sync envelope to apply, got %v", err)
+	}
+
+	body := h.adapter.tokenBodies[tokenID]
+	if string(body) != `{"drwa_enabled":true,"global_pause":false}` {
+		t.Fatalf("unexpected token policy body: %s", string(body))
+	}
+}
+
+// TestDRWAScenarioEncodedSyncEnvelopeDecodeFail proves that malformed sync
+// bytes are rejected before any mirror state is applied.
+func TestDRWAScenarioEncodedSyncEnvelopeDecodeFail(t *testing.T) {
+	h := newDRWASimulatorHarness()
+
+	_, err := decodeDRWASyncEnvelope([]byte("bad-payload"))
+	if err == nil {
+		t.Fatalf("expected malformed sync envelope bytes to be rejected")
+	}
+	if len(h.adapter.tokenBodies) != 0 || len(h.adapter.holderBodies) != 0 {
+		t.Fatalf("malformed payload must not mutate mirror state")
 	}
 }

@@ -62,6 +62,18 @@ func TestTomlParser(t *testing.T) {
 				},
 			},
 		},
+		DRWA: DRWAConfig{
+			Enabled:            true,
+			KeyManagementModel: "multisig_3of5_contract",
+			AuthorizedCallers: DRWAAuthorizedCallersConfig{
+				AuthAdmin:        "erd1authadmin",
+				PolicyRegistry:   "erd1policy",
+				AssetManager:     "erd1asset",
+				IdentityRegistry: "erd1identity",
+				Attestation:      "erd1attestation",
+				RecoveryAdmin:    "erd1recovery",
+			},
+		},
 		MiniBlocksStorage: StorageConfig{
 			Cache: CacheConfig{
 				Capacity: uint32(txBlockBodyStorageSize),
@@ -168,6 +180,18 @@ func TestTomlParser(t *testing.T) {
 	ChainParametersByEpoch = [
         { EnableEpoch = 0, RoundDuration = 4000, ShardConsensusGroupSize = 3, ShardMinNumNodes = 4, MetachainConsensusGroupSize = 5, MetachainMinNumNodes = 6, Hysteresis = 0.0, Adaptivity = false }
     ]
+
+[DRWA]
+    Enabled = true
+    KeyManagementModel = "multisig_3of5_contract"
+    [DRWA.AuthorizedCallers]
+        AuthAdmin = "erd1authadmin"
+        PolicyRegistry = "erd1policy"
+        AssetManager = "erd1asset"
+        IdentityRegistry = "erd1identity"
+        Attestation = "erd1attestation"
+        RecoveryAdmin = "erd1recovery"
+
 [MiniBlocksStorage]
     [MiniBlocksStorage.Cache]
         Capacity = ` + strconv.Itoa(txBlockBodyStorageSize) + `
@@ -655,6 +679,9 @@ func TestEnableEpochConfig(t *testing.T) {
     # ESDTEnableEpoch represents the epoch when ESDT is enabled
     ESDTEnableEpoch = 20
 
+    # DRWAEnforcementEnableEpoch represents the epoch when DRWA token enforcement is enabled
+    DRWAEnforcementEnableEpoch = 20
+
     # GovernanceEnableEpoch represents the epoch when governance is enabled
     GovernanceEnableEpoch = 21
 
@@ -984,6 +1011,7 @@ func TestEnableEpochConfig(t *testing.T) {
 			StakingV2EnableEpoch:                                     18,
 			DoubleKeyProtectionEnableEpoch:                           19,
 			ESDTEnableEpoch:                                          20,
+			DRWAEnforcementEnableEpoch:                               20,
 			GovernanceEnableEpoch:                                    21,
 			GovernanceDisableProposeEnableEpoch:                      22,
 			GovernanceFixesEnableEpoch:                               23,

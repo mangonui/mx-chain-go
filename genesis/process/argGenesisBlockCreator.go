@@ -66,6 +66,7 @@ type ArgsGenesisBlockCreator struct {
 	SystemSCConfig          config.SystemSmartContractsConfig
 	RoundConfig             config.RoundConfig
 	EpochConfig             config.EpochConfig
+	DRWAConfig              config.DRWAConfig
 	HeaderVersionConfigs    config.VersionsConfig
 	WorkingDir              string
 	BlockSignKeyGen         crypto.KeyGenerator

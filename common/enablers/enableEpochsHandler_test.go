@@ -6,6 +6,7 @@ import (
 
 	"github.com/multiversx/mx-chain-core-go/core/check"
 	vmcommon "github.com/multiversx/mx-chain-vm-common-go"
+	builtInFunctions "github.com/multiversx/mx-chain-vm-common-go/builtInFunctions"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -37,6 +38,7 @@ func createEnableEpochsConfig() config.EnableEpochs {
 		StakingV2EnableEpoch:                                     18,
 		DoubleKeyProtectionEnableEpoch:                           19,
 		ESDTEnableEpoch:                                          20,
+		DRWAEnforcementEnableEpoch:                               20,
 		GovernanceEnableEpoch:                                    21,
 		GovernanceDisableProposeEnableEpoch:                      22,
 		GovernanceFixesEnableEpoch:                               23,
@@ -241,6 +243,7 @@ func TestEnableEpochsHandler_IsFlagEnabled(t *testing.T) {
 	require.True(t, handler.IsFlagEnabled(common.StakingV2FlagAfterEpoch))
 	require.True(t, handler.IsFlagEnabled(common.DoubleKeyProtectionFlag))
 	require.True(t, handler.IsFlagEnabled(common.ESDTFlag))
+	require.True(t, handler.IsFlagEnabled(builtInFunctions.DRWAEnforcementFlag))
 	require.False(t, handler.IsFlagEnabled(common.ESDTFlagInSpecificEpochOnly)) // ==
 	require.True(t, handler.IsFlagEnabled(common.GovernanceFlag))
 	require.False(t, handler.IsFlagEnabled(common.GovernanceFlagInSpecificEpochOnly)) // ==
@@ -344,6 +347,28 @@ func TestEnableEpochsHandler_IsFlagEnabled(t *testing.T) {
 	require.True(t, handler.IsFlagEnabled(common.RelayedTransactionsV1V2DisableFlag))
 }
 
+func TestEnableEpochsHandler_DRWAEnforcementFlagActivation(t *testing.T) {
+	t.Parallel()
+
+	cfg := createEnableEpochsConfig()
+	cfg.DRWAEnforcementEnableEpoch = 0
+
+	handler, _ := NewEnableEpochsHandler(cfg, &epochNotifier.EpochNotifierStub{})
+	require.NotNil(t, handler)
+
+	handler.EpochConfirmed(0, 0)
+	require.True(t, handler.IsFlagEnabled(builtInFunctions.DRWAEnforcementFlag))
+
+	cfg.DRWAEnforcementEnableEpoch = 7
+	handler, _ = NewEnableEpochsHandler(cfg, &epochNotifier.EpochNotifierStub{})
+	require.NotNil(t, handler)
+
+	handler.EpochConfirmed(6, 0)
+	require.False(t, handler.IsFlagEnabled(builtInFunctions.DRWAEnforcementFlag))
+	handler.EpochConfirmed(7, 0)
+	require.True(t, handler.IsFlagEnabled(builtInFunctions.DRWAEnforcementFlag))
+}
+
 func TestEnableEpochsHandler_GetActivationEpoch(t *testing.T) {
 	t.Parallel()
 
@@ -368,6 +393,7 @@ func TestEnableEpochsHandler_GetActivationEpoch(t *testing.T) {
 	require.Equal(t, cfg.StakingV2EnableEpoch, handler.GetActivationEpoch(common.StakingV2Flag))
 	require.Equal(t, cfg.DoubleKeyProtectionEnableEpoch, handler.GetActivationEpoch(common.DoubleKeyProtectionFlag))
 	require.Equal(t, cfg.ESDTEnableEpoch, handler.GetActivationEpoch(common.ESDTFlag))
+	require.Equal(t, cfg.DRWAEnforcementEnableEpoch, handler.GetActivationEpoch(builtInFunctions.DRWAEnforcementFlag))
 	require.Equal(t, cfg.GovernanceEnableEpoch, handler.GetActivationEpoch(common.GovernanceFlag))
 	require.Equal(t, cfg.GovernanceDisableProposeEnableEpoch, handler.GetActivationEpoch(common.GovernanceDisableProposeFlag))
 	require.Equal(t, cfg.GovernanceFixesEnableEpoch, handler.GetActivationEpoch(common.GovernanceFixesFlag))

@@ -28,7 +28,7 @@ func TestApplyDRWASyncEnvelopeEdgeCases(t *testing.T) {
 			{OperationType: drwaSyncOpTokenPolicy, TokenID: "B", Version: 1, Body: []byte(`{}`)},
 		},
 	}
-	_, err = applyDRWASyncEnvelope(adapter, tooMany, 1, []byte("policy_registry"))
+	_, err = applyDRWASyncEnvelope(adapter, tooMany, 1, testDRWACallerAddress(drwaSyncCallerPolicyRegistry))
 	require.Error(t, err)
 
 	hashMismatch := &drwaSyncEnvelope{
@@ -38,7 +38,7 @@ func TestApplyDRWASyncEnvelopeEdgeCases(t *testing.T) {
 		},
 		PayloadHash: bytes.Repeat([]byte{1}, drwaBinaryHashSize),
 	}
-	_, err = applyDRWASyncEnvelope(adapter, hashMismatch, 4, []byte("policy_registry"))
+	_, err = applyDRWASyncEnvelope(adapter, hashMismatch, 4, testDRWACallerAddress(drwaSyncCallerPolicyRegistry))
 	require.Error(t, err)
 }
 
@@ -80,15 +80,15 @@ func TestIsDRWASyncCallerAuthorizedRejectsInvalidInputs(t *testing.T) {
 
 	require.False(t, isDRWASyncCallerAuthorized(adapter, "unknown", []drwaSyncOperation{
 		{OperationType: drwaSyncOpTokenPolicy},
-	}, []byte("policy_registry")))
+	}, testDRWACallerAddress(drwaSyncCallerPolicyRegistry)))
 
 	require.False(t, isDRWASyncCallerAuthorized(adapter, drwaSyncCallerIdentityRegistry, []drwaSyncOperation{
 		{OperationType: drwaSyncOpTokenPolicy},
-	}, []byte("identity_registry")))
+	}, testDRWACallerAddress(drwaSyncCallerIdentityRegistry)))
 
 	require.False(t, isDRWASyncCallerAuthorized(adapter, drwaSyncCallerAttestation, []drwaSyncOperation{
 		{OperationType: drwaSyncOpHolderMirror},
-	}, []byte("attestation")))
+	}, testDRWACallerAddress(drwaSyncCallerAttestation)))
 }
 
 func TestSerializeDRWASyncEnvelopePayloadRejectsUnknownDomainAndOperation(t *testing.T) {
@@ -99,4 +99,53 @@ func TestSerializeDRWASyncEnvelopePayloadRejectsUnknownDomainAndOperation(t *tes
 		OperationType: "unknown",
 	}})
 	require.Error(t, err)
+}
+
+func TestAuthAdminAuthorizedCallerUpdate(t *testing.T) {
+	adapter := newMockDRWASyncStateAdapter()
+	newAddressHex := "0x1111111111111111111111111111111111111111111111111111111111111111"
+
+	envelope := &drwaSyncEnvelope{
+		CallerDomain: drwaSyncCallerAuthAdmin,
+		Operations: []drwaSyncOperation{{
+			OperationType: drwaSyncOpAuthorizedCallerUpdate,
+			TokenID:       drwaSyncCallerPolicyRegistry,
+			Version:       1,
+			Body:          []byte(newAddressHex),
+		}},
+	}
+	hash, err := computeDRWASyncHash(envelope.CallerDomain, envelope.Operations)
+	require.NoError(t, err)
+	envelope.PayloadHash = hash
+
+	result, err := applyDRWASyncEnvelope(adapter, envelope, 4, testDRWACallerAddress(drwaSyncCallerAuthAdmin))
+	require.NoError(t, err)
+	require.Equal(t, 1, result.AppliedOperations)
+	require.Equal(t, uint64(1), adapter.authorizedCallerVersions[drwaSyncCallerPolicyRegistry])
+
+	expected, err := NormalizeDRWAAuthorizedCallerAddress(newAddressHex)
+	require.NoError(t, err)
+	require.Equal(t, expected, adapter.authorizedCallers[drwaSyncCallerPolicyRegistry])
+}
+
+func TestAuthAdminAuthorizedCallerUpdateRejectsStaleVersion(t *testing.T) {
+	adapter := newMockDRWASyncStateAdapter()
+	adapter.authorizedCallerVersions[drwaSyncCallerPolicyRegistry] = 2
+
+	envelope := &drwaSyncEnvelope{
+		CallerDomain: drwaSyncCallerAuthAdmin,
+		Operations: []drwaSyncOperation{{
+			OperationType: drwaSyncOpAuthorizedCallerUpdate,
+			TokenID:       drwaSyncCallerPolicyRegistry,
+			Version:       2,
+			Body:          []byte("0x1111111111111111111111111111111111111111111111111111111111111111"),
+		}},
+	}
+	hash, err := computeDRWASyncHash(envelope.CallerDomain, envelope.Operations)
+	require.NoError(t, err)
+	envelope.PayloadHash = hash
+
+	_, err = applyDRWASyncEnvelope(adapter, envelope, 4, testDRWACallerAddress(drwaSyncCallerAuthAdmin))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), drwaSyncRejectReplayDuplicate)
 }

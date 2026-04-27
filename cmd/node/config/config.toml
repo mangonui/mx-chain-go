@@ -55,6 +55,18 @@
 [HardwareRequirements]
     CPUFlags = ["SSE4", "SSE42"]
 
+[DRWA]
+    Enabled = false
+    KeyManagementModel = ""
+
+    [DRWA.AuthorizedCallers]
+        AuthAdmin = ""
+        PolicyRegistry = ""
+        AssetManager = ""
+        IdentityRegistry = ""
+        Attestation = ""
+        RecoveryAdmin = ""
+
 [Versions]
     DefaultVersion = "default"
     VersionsByEpochs = [

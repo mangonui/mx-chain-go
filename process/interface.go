@@ -528,6 +528,8 @@ type BlockChainHookHandler interface {
 	NewAddress(creatorAddress []byte, creatorNonce uint64, vmType []byte) ([]byte, error)
 	ProcessBuiltInFunction(input *vmcommon.ContractCallInput) (*vmcommon.VMOutput, error)
 	ApplyDRWASyncEnvelopeBytes(payload []byte, callerAddress []byte) error
+	QueryDRWANativeGovernance(queryType uint32, key []byte) ([]byte, error)
+	IsAuthorizedDRWASyncCaller(callerAddress []byte) bool
 	SaveNFTMetaDataToSystemAccount(tx data.TransactionHandler) error
 	GetShardOfAddress(address []byte) uint32
 	IsSmartContract(address []byte) bool

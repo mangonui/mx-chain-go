@@ -28,6 +28,8 @@ type BlockChainHookStub struct {
 	CurrentEpochCalled               func() uint32
 	ProcessBuiltInFunctionCalled     func(input *vmcommon.ContractCallInput) (*vmcommon.VMOutput, error)
 	ApplyDRWASyncEnvelopeBytesCalled func(payload []byte, callerAddress []byte) error
+	QueryDRWANativeGovernanceCalled  func(queryType uint32, key []byte) ([]byte, error)
+	IsAuthorizedDRWASyncCallerCalled func(callerAddress []byte) bool
 	GetBuiltinFunctionNamesCalled    func() vmcommon.FunctionNames
 	GetAllStateCalled                func(address []byte) (map[string][]byte, error)
 	IsPayableCalled                  func(sndAddress, rcvAddress []byte) (bool, error)
@@ -208,6 +210,22 @@ func (b *BlockChainHookStub) ApplyDRWASyncEnvelopeBytes(payload []byte, callerAd
 		return b.ApplyDRWASyncEnvelopeBytesCalled(payload, callerAddress)
 	}
 	return nil
+}
+
+// QueryDRWANativeGovernance -
+func (b *BlockChainHookStub) QueryDRWANativeGovernance(queryType uint32, key []byte) ([]byte, error) {
+	if b.QueryDRWANativeGovernanceCalled != nil {
+		return b.QueryDRWANativeGovernanceCalled(queryType, key)
+	}
+	return nil, nil
+}
+
+// IsAuthorizedDRWASyncCaller -
+func (b *BlockChainHookStub) IsAuthorizedDRWASyncCaller(callerAddress []byte) bool {
+	if b.IsAuthorizedDRWASyncCallerCalled != nil {
+		return b.IsAuthorizedDRWASyncCallerCalled(callerAddress)
+	}
+	return false
 }
 
 // GetAllState -

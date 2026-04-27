@@ -47,7 +47,7 @@ func TestApplyDRWASyncEnvelopeRecordsHashMismatchMetric(t *testing.T) {
 		}},
 	}
 
-	_, err := applyDRWASyncEnvelope(adapter, envelope, 16, []byte("policy_registry"))
+	_, err := applyDRWASyncEnvelope(adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerPolicyRegistry))
 	if err == nil {
 		t.Fatalf("expected hash mismatch rejection")
 	}
@@ -77,7 +77,7 @@ func TestApplyDRWASyncEnvelopeRecordsSuccessMetric(t *testing.T) {
 	hash, _ := computeDRWASyncHash(envelope.CallerDomain, envelope.Operations)
 	envelope.PayloadHash = hash
 
-	_, err := applyDRWASyncEnvelope(adapter, envelope, 16, []byte("policy_registry"))
+	_, err := applyDRWASyncEnvelope(adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerPolicyRegistry))
 	if err != nil {
 		t.Fatalf("expected successful sync apply, got %v", err)
 	}
@@ -180,13 +180,14 @@ func TestBuildDRWARolloutVerificationReportRecordsPassAndRejectMetrics(t *testin
 		Stage:                  drwaRolloutStageCanary,
 		MaxSyncFailureRateBps:  10,
 		MaxAPIErrorRateBps:     10,
-		MaxDenialMismatchCount: 1,
+		MaxDenialMismatchRateBps: 1,
 	}
 
 	_, err := buildDRWARolloutVerificationReport(healthyManifest, &drwaRolloutObservedMetrics{
 		SyncFailureRateBps:  1,
 		APIErrorRateBps:     1,
 		DenialMismatchCount: 0,
+		DenialComparisonsTotal: 100,
 	})
 	if err != nil {
 		t.Fatalf("build healthy verification report: %v", err)
@@ -196,6 +197,7 @@ func TestBuildDRWARolloutVerificationReportRecordsPassAndRejectMetrics(t *testin
 		SyncFailureRateBps:  11,
 		APIErrorRateBps:     1,
 		DenialMismatchCount: 0,
+		DenialComparisonsTotal: 100,
 	})
 	if err != nil {
 		t.Fatalf("build rejected verification report: %v", err)

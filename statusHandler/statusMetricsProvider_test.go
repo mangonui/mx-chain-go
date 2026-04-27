@@ -13,6 +13,40 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestAppendSnapshotPrometheusMetricsShouldSanitizeAndRenderMetrics(t *testing.T) {
+	t.Parallel()
+
+	builder := strings.Builder{}
+	statusHandler.AppendSnapshotPrometheusMetricsForTests(&builder, 7, "erd_drwa_gate_", map[string]uint64{
+		"gate-reader-missing": 2,
+		"gate.decode.failure": 1,
+	})
+
+	output := builder.String()
+	assert.Contains(t, output, `erd_drwa_gate_gate_reader_missing{erd_shard_id="7"} 2`)
+	assert.Contains(t, output, `erd_drwa_gate_gate_decode_failure{erd_shard_id="7"} 1`)
+}
+
+func TestStatusMetricsWithoutP2PPrometheusStringShouldIncludeDRWAMetrics(t *testing.T) {
+	originalGateProvider := statusHandler.DrwaGateMetricsSnapshotProviderForTests()
+	originalSyncProvider := statusHandler.DrwaSyncMetricsSnapshotProviderForTests()
+	statusHandler.SetDrwaGateMetricsSnapshotProviderForTests(func() map[string]uint64 {
+		return map[string]uint64{"gate_reader_missing": 3}
+	})
+	statusHandler.SetDrwaSyncMetricsSnapshotProviderForTests(func() map[string]uint64 {
+		return map[string]uint64{"sync_apply_success": 5}
+	})
+	defer statusHandler.SetDrwaGateMetricsSnapshotProviderForTests(originalGateProvider)
+	defer statusHandler.SetDrwaSyncMetricsSnapshotProviderForTests(originalSyncProvider)
+
+	sm := statusHandler.NewStatusMetrics()
+	output, err := sm.StatusMetricsWithoutP2PPrometheusString()
+
+	require.NoError(t, err)
+	assert.Contains(t, output, `erd_drwa_gate_gate_reader_missing{erd_shard_id="0"} 3`)
+	assert.Contains(t, output, `erd_drwa_sync_sync_apply_success{erd_shard_id="0"} 5`)
+}
+
 func TestNewStatusMetricsProvider(t *testing.T) {
 	t.Parallel()
 

@@ -54,8 +54,9 @@ func (pcf *processComponentsFactory) createAPITransactionEvaluator(epochStartTri
 	}
 
 	dataFieldParser, err := datafield.NewOperationDataFieldParser(&datafield.ArgsOperationDataFieldParser{
-		AddressLength: pcf.coreData.AddressPubKeyConverter().Len(),
-		Marshalizer:   pcf.coreData.InternalMarshalizer(),
+		AddressLength:                       pcf.coreData.AddressPubKeyConverter().Len(),
+		Marshalizer:                         pcf.coreData.InternalMarshalizer(),
+		RelayedTransactionsV1V2DisableEpoch: pcf.epochConfig.EnableEpochs.RelayedTransactionsV1V2DisableEpoch,
 	})
 	if err != nil {
 		return nil, nil, err

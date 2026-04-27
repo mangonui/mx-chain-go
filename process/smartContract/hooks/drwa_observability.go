@@ -1,6 +1,8 @@
 package hooks
 
 import (
+	"sync"
+
 	builtInFunctions "github.com/multiversx/mx-chain-vm-common-go/builtInFunctions"
 )
 
@@ -21,16 +23,47 @@ const (
 	drwaMetricRolloutThresholdConfigFallback = "rollout_threshold_config_fallback"
 	drwaMetricNonGovernanceSyncWrite         = "sync_non_governance_write"          // F-001
 	drwaMetricRecoveryTimelockSkipped        = "sync_recovery_timelock_skipped"     // F-002
+	drwaMetricRecoveryStateHashSkipped       = "sync_recovery_state_hash_skipped"   // C-35
 	drwaMetricJSONStateWrite                 = "sync_json_state_write"              // F-006
 	drwaMetricDeleteHolderRevertFailure      = "sync_delete_holder_revert_failure"  // F-019
+	drwaMetricAuthorizedCallerMalformed      = "sync_authorized_caller_malformed"   // M-08
+	drwaMetricGovernanceApprovalStaleAfterRotation = "governance_approval_stale_after_rotation" // B-10
+	drwaMetricGovernanceEnvelopeHashMismatch       = "governance_envelope_hash_mismatch"       // M-13
 )
 
 // drwaMetrics is safe for concurrent use: DrwaCounterSet guards all
 // operations (Increment, Snapshot, Reset) with a sync.Mutex internally.
 var drwaMetrics = builtInFunctions.NewDrwaCounterSet()
+var drwaSyncMetricsExporterState = struct {
+	mut      sync.RWMutex
+	exporter func(metric string, delta uint64)
+}{}
+
+// SetDRWASyncMetricsExporter configures an optional callback invoked on every
+// sync metric increment. Passing nil disables the callback.
+func SetDRWASyncMetricsExporter(exporter func(metric string, delta uint64)) {
+	drwaSyncMetricsExporterState.mut.Lock()
+	drwaSyncMetricsExporterState.exporter = exporter
+	drwaSyncMetricsExporterState.mut.Unlock()
+}
 
 func recordDRWAMetric(metric string) {
 	drwaMetrics.Increment(metric)
+
+	drwaSyncMetricsExporterState.mut.RLock()
+	exporter := drwaSyncMetricsExporterState.exporter
+	drwaSyncMetricsExporterState.mut.RUnlock()
+	if exporter == nil {
+		return
+	}
+
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			log.Warn("drwa sync metrics exporter callback panicked", "panic", recovered)
+		}
+	}()
+
+	exporter(metric, 1)
 }
 
 func snapshotDRWAMetrics() map[string]uint64 {

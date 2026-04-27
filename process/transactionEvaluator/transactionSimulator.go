@@ -136,10 +136,10 @@ func (ts *transactionSimulator) process(txHandler data.TransactionHandler, curre
 		return nil, errors.New("unknown type")
 	}
 
-	return ts.prepareOutput(txHandler, retCode, err)
+	return ts.prepareOutput(txHandler, retCode, err, currentHeader)
 }
 
-func (ts *transactionSimulator) prepareOutput(txHandler data.TransactionHandler, retCode vmcommon.ReturnCode, err error) (*txSimData.SimulationResultsWithVMOutput, error) {
+func (ts *transactionSimulator) prepareOutput(txHandler data.TransactionHandler, retCode vmcommon.ReturnCode, err error, currentHeader data.HeaderHandler) (*txSimData.SimulationResultsWithVMOutput, error) {
 	txStatus := transaction.TxStatusSuccess
 	failReason := ""
 
@@ -158,7 +158,7 @@ func (ts *transactionSimulator) prepareOutput(txHandler data.TransactionHandler,
 		},
 	}
 
-	err = ts.addIntermediateTxsToResult(results)
+	err = ts.addIntermediateTxsToResult(results, currentHeader.GetEpoch())
 	if err != nil {
 		return nil, err
 	}
@@ -213,7 +213,7 @@ func (ts *transactionSimulator) getVMOutput(tx data.TransactionHandler) (*vmcomm
 	return vmOutput, true
 }
 
-func (ts *transactionSimulator) addIntermediateTxsToResult(result *txSimData.SimulationResultsWithVMOutput) error {
+func (ts *transactionSimulator) addIntermediateTxsToResult(result *txSimData.SimulationResultsWithVMOutput, epoch uint32) error {
 	defer func() {
 		processorsKeys := ts.intermProcContainer.Keys()
 		for _, procKey := range processorsKeys {
@@ -237,7 +237,7 @@ func (ts *transactionSimulator) addIntermediateTxsToResult(result *txSimData.Sim
 		if !ok {
 			continue
 		}
-		scResults[hex.EncodeToString([]byte(hash))] = ts.adaptSmartContractResult(scr)
+		scResults[hex.EncodeToString([]byte(hash))] = ts.adaptSmartContractResult(scr, epoch)
 	}
 	result.ScResults = scResults
 
@@ -263,14 +263,14 @@ func (ts *transactionSimulator) addIntermediateTxsToResult(result *txSimData.Sim
 	return nil
 }
 
-func (ts *transactionSimulator) adaptSmartContractResult(scr *smartContractResult.SmartContractResult) *transaction.ApiSmartContractResult {
+func (ts *transactionSimulator) adaptSmartContractResult(scr *smartContractResult.SmartContractResult, epoch uint32) *transaction.ApiSmartContractResult {
 	isRefund := ts.refundDetector.IsRefund(transactionAPI.RefundDetectorInput{
 		Value:         scr.Value.String(),
 		Data:          scr.Data,
 		ReturnMessage: string(scr.ReturnMessage),
 		GasLimit:      scr.GasLimit,
 	})
-	res := ts.dataFieldParser.Parse(scr.Data, scr.SndAddr, scr.RcvAddr, ts.shardCoordinator.NumberOfShards(), 0)
+	res := ts.dataFieldParser.Parse(scr.Data, scr.SndAddr, scr.RcvAddr, ts.shardCoordinator.NumberOfShards(), epoch)
 
 	receiversEncoded, err := ts.addressPubKeyConverter.EncodeSlice(res.Receivers)
 	if err != nil {

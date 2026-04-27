@@ -18,6 +18,12 @@ const (
 	// drwaGovernanceProposalPrefix is the storage key prefix for proposals.
 	// Full key: DRWA_PROPOSAL_<hex(proposalID)>
 	drwaGovernanceProposalPrefix = "DRWA_PROPOSAL_"
+
+	// drwaGovernanceAuditPrefix is the storage key prefix for the M-14
+	// compact audit records written on successful proposal execution
+	// and preserved across `PruneProposal`.
+	// Full key: DRWA_GOV_AUDIT_<hex(proposalID)>
+	drwaGovernanceAuditPrefix = "DRWA_GOV_AUDIT_"
 )
 
 // drwaGovernanceTrieStore implements DRWAGovernanceStore using the same
@@ -44,6 +50,35 @@ func buildDRWAGovernanceProposalKey(proposalID [32]byte) []byte {
 	return []byte(drwaGovernanceProposalPrefix + hex.EncodeToString(proposalID[:]))
 }
 
+func buildDRWAGovernanceAuditKey(proposalID [32]byte) []byte {
+	return []byte(drwaGovernanceAuditPrefix + hex.EncodeToString(proposalID[:]))
+}
+
+func cloneDRWAGovernanceConfig(cfg *DRWAGovernanceConfig) *DRWAGovernanceConfig {
+	if cfg == nil {
+		return nil
+	}
+
+	cloned := &DRWAGovernanceConfig{
+		Version:     cfg.Version,
+		Threshold:   cfg.Threshold,
+		ProposalTTL: cfg.ProposalTTL,
+		MaxSigners:  cfg.MaxSigners,
+	}
+	if len(cfg.Signers) > 0 {
+		cloned.Signers = make([][]byte, len(cfg.Signers))
+		for i, signer := range cfg.Signers {
+			cloned.Signers[i] = append([]byte(nil), signer...)
+		}
+	}
+	if cfg.RolloutThresholds != nil {
+		rollout := *cfg.RolloutThresholds
+		cloned.RolloutThresholds = &rollout
+	}
+
+	return cloned
+}
+
 func (s *drwaGovernanceTrieStore) GetGovernanceConfig(tokenID string) (*DRWAGovernanceConfig, error) {
 	systemAccount, err := s.getSystemAccount()
 	if err != nil {
@@ -67,7 +102,7 @@ func (s *drwaGovernanceTrieStore) GetGovernanceConfig(tokenID string) (*DRWAGove
 	return cfg, nil
 }
 
-func (s *drwaGovernanceTrieStore) SaveGovernanceConfig(tokenID string, cfg *DRWAGovernanceConfig) error {
+func (s *drwaGovernanceTrieStore) SaveGovernanceConfig(tokenID string, cfg *DRWAGovernanceConfig, expectedVersion ...uint64) error {
 	if cfg == nil {
 		return errDRWAGovernanceNilStore
 	}
@@ -77,17 +112,54 @@ func (s *drwaGovernanceTrieStore) SaveGovernanceConfig(tokenID string, cfg *DRWA
 		return err
 	}
 
-	payload, err := json.Marshal(cfg)
+	key := buildDRWAGovernanceConfigKey(tokenID)
+	currentVersion := uint64(0)
+	value, _, err := systemAccount.AccountDataHandler().RetrieveValue(key)
+	if err != nil {
+		return err
+	}
+	if len(value) > 0 {
+		current := &DRWAGovernanceConfig{}
+		if err = json.Unmarshal(value, current); err != nil {
+			return fmt.Errorf("corrupt governance config for token %s: %w", tokenID, err)
+		}
+		currentVersion = current.Version
+	}
+
+	matchVersion := cfg.Version
+	if len(expectedVersion) > 0 {
+		matchVersion = expectedVersion[0]
+	}
+	if matchVersion != currentVersion {
+		return errDRWAGovernanceConfigVersionMismatch
+	}
+
+	toStore := cloneDRWAGovernanceConfig(cfg)
+	toStore.Version = currentVersion + 1
+	payload, err := json.Marshal(toStore)
 	if err != nil {
 		return err
 	}
 
-	key := buildDRWAGovernanceConfigKey(tokenID)
 	if err = systemAccount.AccountDataHandler().SaveKeyValue(key, payload); err != nil {
 		return err
 	}
+	cfg.Version = toStore.Version
 
 	return s.accounts.SaveAccount(systemAccount)
+}
+
+func (s *drwaGovernanceTrieStore) GetRolloutThresholdConfig(tokenID string) (*drwaRolloutThresholdConfig, error) {
+	cfg, err := s.GetGovernanceConfig(tokenID)
+	if err != nil {
+		return nil, err
+	}
+	if cfg == nil || cfg.RolloutThresholds == nil {
+		return nil, nil
+	}
+
+	rollout := *cfg.RolloutThresholds
+	return &rollout, nil
 }
 
 func (s *drwaGovernanceTrieStore) GetProposal(proposalID [32]byte) (*DRWAGovernanceProposal, error) {
@@ -150,6 +222,58 @@ func (s *drwaGovernanceTrieStore) DeleteProposal(proposalID [32]byte) error {
 	}
 
 	return s.accounts.SaveAccount(systemAccount)
+}
+
+// M-14: persist the compact audit record keyed by proposal ID. This
+// record survives `PruneProposal` so the forensic trail outlives the
+// full proposal payload.
+func (s *drwaGovernanceTrieStore) SaveAuditRecord(record *DRWAGovernanceAuditRecord) error {
+	if record == nil {
+		return errDRWAGovernanceProposalNotFound
+	}
+
+	systemAccount, err := s.getSystemAccount()
+	if err != nil {
+		return err
+	}
+
+	payload, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+
+	key := buildDRWAGovernanceAuditKey(record.ProposalID)
+	if err = systemAccount.AccountDataHandler().SaveKeyValue(key, payload); err != nil {
+		return err
+	}
+
+	return s.accounts.SaveAccount(systemAccount)
+}
+
+// M-14: retrieve a previously-saved audit record. Returns (nil, nil)
+// when no record exists so callers can distinguish "never executed"
+// from "transport error."
+func (s *drwaGovernanceTrieStore) GetAuditRecord(proposalID [32]byte) (*DRWAGovernanceAuditRecord, error) {
+	systemAccount, err := s.getSystemAccount()
+	if err != nil {
+		return nil, err
+	}
+
+	key := buildDRWAGovernanceAuditKey(proposalID)
+	value, _, err := systemAccount.AccountDataHandler().RetrieveValue(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(value) == 0 {
+		return nil, nil
+	}
+
+	record := &DRWAGovernanceAuditRecord{}
+	if err = json.Unmarshal(value, record); err != nil {
+		return nil, fmt.Errorf("corrupt governance audit record %x: %w", proposalID, err)
+	}
+
+	return record, nil
 }
 
 func (s *drwaGovernanceTrieStore) getSystemAccount() (vmcommon.UserAccountHandler, error) {

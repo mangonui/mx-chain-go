@@ -921,6 +921,7 @@ func (pcf *processComponentsFactory) generateGenesisHeadersAndApplyInitialBalanc
 		SystemSCConfig:          *pcf.systemSCConfig,
 		RoundConfig:             pcf.roundConfig,
 		EpochConfig:             pcf.epochConfig,
+		DRWAConfig:              pcf.config.DRWA,
 		HeaderVersionConfigs:    pcf.config.Versions,
 		BlockSignKeyGen:         pcf.crypto.BlockSignKeyGen(),
 		HistoryRepository:       pcf.historyRepo,

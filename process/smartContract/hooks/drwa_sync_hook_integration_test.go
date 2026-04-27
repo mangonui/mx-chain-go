@@ -3,9 +3,11 @@ package hooks
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/multiversx/mx-chain-core-go/hashing/keccak"
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -69,7 +71,7 @@ func TestIntegrationBinaryPipelineTokenPolicyAndHolderMirror(t *testing.T) {
 	envelope.RecoveryScope = []string{drwaIntTestTokenEstate}
 
 	adapter := newMockDRWASyncStateAdapter()
-	callerAddr := []byte("recovery_admin")
+	callerAddr := testDRWACallerAddress(drwaSyncCallerRecoveryAdmin)
 
 	result, err := applyDRWASyncEnvelope(adapter, envelope, drwaSyncMaxOperations, callerAddr)
 	if err != nil {
@@ -113,7 +115,7 @@ func TestIntegrationBinaryPipelinePolicyRegistryTokenPolicy(t *testing.T) {
 	}
 
 	adapter := newMockDRWASyncStateAdapter()
-	result, err := applyDRWASyncEnvelope(adapter, envelope, drwaSyncMaxOperations, []byte("policy_registry"))
+	result, err := applyDRWASyncEnvelope(adapter, envelope, drwaSyncMaxOperations, testDRWACallerAddress(drwaSyncCallerPolicyRegistry))
 	if err != nil {
 		t.Fatalf(drwaIntTestMsgApply, err)
 	}
@@ -141,7 +143,7 @@ func TestIntegrationBinaryPipelineAssetManagerHolderMirror(t *testing.T) {
 	}
 
 	adapter := newMockDRWASyncStateAdapter()
-	result, err := applyDRWASyncEnvelope(adapter, envelope, drwaSyncMaxOperations, []byte("asset_manager"))
+	result, err := applyDRWASyncEnvelope(adapter, envelope, drwaSyncMaxOperations, testDRWACallerAddress(drwaSyncCallerAssetManager))
 	if err != nil {
 		t.Fatalf(drwaIntTestMsgApply, err)
 	}
@@ -176,7 +178,7 @@ func TestIntegrationBinaryPipelineMultipleTokenPolicies(t *testing.T) {
 	}
 
 	adapter := newMockDRWASyncStateAdapter()
-	result, err := applyDRWASyncEnvelope(adapter, envelope, drwaSyncMaxOperations, []byte("policy_registry"))
+	result, err := applyDRWASyncEnvelope(adapter, envelope, drwaSyncMaxOperations, testDRWACallerAddress(drwaSyncCallerPolicyRegistry))
 	if err != nil {
 		t.Fatalf(drwaIntTestMsgApply, err)
 	}
@@ -185,6 +187,192 @@ func TestIntegrationBinaryPipelineMultipleTokenPolicies(t *testing.T) {
 	}
 	if adapter.tokenVersions["TOKEN-A"] != 1 || adapter.tokenVersions["TOKEN-B"] != 1 {
 		t.Fatal("both token policies should be at version 1")
+	}
+}
+
+func TestIntegrationBinaryPipelineAuthAdminAuthorizedCallerUpdate(t *testing.T) {
+	op := drwaSyncOperation{
+		OperationType: drwaSyncOpAuthorizedCallerUpdate,
+		TokenID:       drwaSyncCallerPolicyRegistry,
+		Version:       1,
+		Body:          []byte("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+	}
+
+	payload := buildBinaryEnvelope(t, drwaSyncCallerAuthAdmin, []drwaSyncOperation{op})
+	envelope, err := decodeDRWASyncEnvelope(payload)
+	if err != nil {
+		t.Fatalf(drwaIntTestMsgDecode, err)
+	}
+
+	adapter := newMockDRWASyncStateAdapter()
+	result, err := applyDRWASyncEnvelope(adapter, envelope, drwaSyncMaxOperations, testDRWACallerAddress(drwaSyncCallerAuthAdmin))
+	if err != nil {
+		t.Fatalf(drwaIntTestMsgApply, err)
+	}
+	if result.AppliedOperations != 1 {
+		t.Fatalf(drwaTestMsgOneApplied, result.AppliedOperations)
+	}
+	if adapter.authorizedCallerVersions[drwaSyncCallerPolicyRegistry] != 1 {
+		t.Fatal("authorized caller version not written")
+	}
+
+	expected, err := NormalizeDRWAAuthorizedCallerAddress(string(op.Body))
+	if err != nil {
+		t.Fatalf("NormalizeDRWAAuthorizedCallerAddress: %v", err)
+	}
+	if !bytes.Equal(adapter.authorizedCallers[drwaSyncCallerPolicyRegistry], expected) {
+		t.Fatal("authorized caller body mismatch")
+	}
+}
+
+func TestIntegrationBinaryPipelineAuthAdminRejectsVersionGap(t *testing.T) {
+	op := drwaSyncOperation{
+		OperationType: drwaSyncOpAuthorizedCallerUpdate,
+		TokenID:       drwaSyncCallerPolicyRegistry,
+		Version:       3,
+		Body:          []byte("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+	}
+
+	payload := buildBinaryEnvelope(t, drwaSyncCallerAuthAdmin, []drwaSyncOperation{op})
+	envelope, err := decodeDRWASyncEnvelope(payload)
+	if err != nil {
+		t.Fatalf(drwaIntTestMsgDecode, err)
+	}
+
+	adapter := newMockDRWASyncStateAdapter()
+	require.NoError(t, adapter.SetAuthorizedCallerAddressVersioned(drwaSyncCallerPolicyRegistry, testDRWACallerAddress(drwaSyncCallerPolicyRegistry), 1))
+
+	_, err = applyDRWASyncEnvelope(adapter, envelope, drwaSyncMaxOperations, testDRWACallerAddress(drwaSyncCallerAuthAdmin))
+	if err == nil || err.Error() != drwaSyncRejectVersionGap {
+		t.Fatalf("expected version gap rejection for auth_admin update, got %v", err)
+	}
+}
+
+func TestIntegrationBinaryPipelineAuthAdminRejectsEmptyDomain(t *testing.T) {
+	op := drwaSyncOperation{
+		OperationType: drwaSyncOpAuthorizedCallerUpdate,
+		TokenID:       "",
+		Version:       1,
+		Body:          []byte("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+	}
+
+	payload := buildBinaryEnvelope(t, drwaSyncCallerAuthAdmin, []drwaSyncOperation{op})
+	_, err := decodeDRWASyncEnvelope(payload)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid token_id")
+
+	_ = newMockDRWASyncStateAdapter()
+}
+
+func TestIntegrationBinaryPipelineAuthAdminRejectsControlCharDomain(t *testing.T) {
+	op := drwaSyncOperation{
+		OperationType: drwaSyncOpAuthorizedCallerUpdate,
+		TokenID:       "policy\x00registry",
+		Version:       1,
+		Body:          []byte("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+	}
+
+	payload := buildBinaryEnvelope(t, drwaSyncCallerAuthAdmin, []drwaSyncOperation{op})
+	_, err := decodeDRWASyncEnvelope(payload)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid token_id")
+
+	_ = newMockDRWASyncStateAdapter()
+}
+
+func TestIntegrationBinaryPipelineAuthAdminRejectsHashMismatch(t *testing.T) {
+	op := drwaSyncOperation{
+		OperationType: drwaSyncOpAuthorizedCallerUpdate,
+		TokenID:       drwaSyncCallerPolicyRegistry,
+		Version:       1,
+		Body:          []byte("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+	}
+
+	canonical, err := serializeDRWASyncEnvelopePayload(drwaSyncCallerAuthAdmin, []drwaSyncOperation{op})
+	if err != nil {
+		t.Fatalf("serializeDRWASyncEnvelopePayload: %v", err)
+	}
+	badHash, err := computeDRWASyncHash(drwaSyncCallerPolicyRegistry, []drwaSyncOperation{op})
+	if err != nil {
+		t.Fatalf("computeDRWASyncHash: %v", err)
+	}
+
+	payload := append(badHash, canonical...)
+	envelope, err := decodeDRWASyncEnvelope(payload)
+	if err != nil {
+		t.Fatalf(drwaIntTestMsgDecode, err)
+	}
+
+	adapter := newMockDRWASyncStateAdapter()
+	_, err = applyDRWASyncEnvelope(adapter, envelope, drwaSyncMaxOperations, testDRWACallerAddress(drwaSyncCallerAuthAdmin))
+	if err == nil || err.Error() != drwaSyncRejectHashMismatch {
+		t.Fatalf("expected hash mismatch rejection, got %v", err)
+	}
+}
+
+func TestIntegrationBinaryPipelineAuthAdminUnauthorizedCaller(t *testing.T) {
+	op := drwaSyncOperation{
+		OperationType: drwaSyncOpAuthorizedCallerUpdate,
+		TokenID:       drwaSyncCallerPolicyRegistry,
+		Version:       1,
+		Body:          []byte("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+	}
+
+	payload := buildBinaryEnvelope(t, drwaSyncCallerAuthAdmin, []drwaSyncOperation{op})
+	envelope, err := decodeDRWASyncEnvelope(payload)
+	if err != nil {
+		t.Fatalf(drwaIntTestMsgDecode, err)
+	}
+
+	adapter := newMockDRWASyncStateAdapter()
+	_, err = applyDRWASyncEnvelope(adapter, envelope, drwaSyncMaxOperations, []byte("wrong_auth_admin"))
+	if err == nil || err.Error() != drwaSyncRejectUnauthorizedCaller {
+		t.Fatalf("expected unauthorized caller rejection, got %v", err)
+	}
+}
+
+func TestIntegrationBinaryPipelineAuthAdminRejectsInvalidAddressBody(t *testing.T) {
+	op := drwaSyncOperation{
+		OperationType: drwaSyncOpAuthorizedCallerUpdate,
+		TokenID:       drwaSyncCallerPolicyRegistry,
+		Version:       1,
+		Body:          []byte("not-hex-not-bech32"),
+	}
+
+	payload := buildBinaryEnvelope(t, drwaSyncCallerAuthAdmin, []drwaSyncOperation{op})
+	envelope, err := decodeDRWASyncEnvelope(payload)
+	if err != nil {
+		t.Fatalf(drwaIntTestMsgDecode, err)
+	}
+
+	adapter := newMockDRWASyncStateAdapter()
+	_, err = applyDRWASyncEnvelope(adapter, envelope, drwaSyncMaxOperations, testDRWACallerAddress(drwaSyncCallerAuthAdmin))
+	if err == nil {
+		t.Fatal("expected invalid authorized caller body rejection")
+	}
+	if !errors.Is(err, errDRWAInvalidAuthorizedCaller) {
+		t.Fatalf("expected errDRWAInvalidAuthorizedCaller, got %v", err)
+	}
+}
+
+func TestIntegrationBinaryPipelineAuthAdminRejectsDomainOperationMismatch(t *testing.T) {
+	op := drwaSyncOperation{
+		OperationType: drwaSyncOpTokenPolicy,
+		TokenID:       drwaIntTestTokenCarbon,
+		Version:       1,
+		Body:          []byte(`{}`),
+	}
+
+	payload := buildBinaryEnvelope(t, drwaSyncCallerAuthAdmin, []drwaSyncOperation{op})
+	envelope, err := decodeDRWASyncEnvelope(payload)
+	if err != nil {
+		t.Fatalf(drwaIntTestMsgDecode, err)
+	}
+
+	adapter := newMockDRWASyncStateAdapter()
+	_, err = applyDRWASyncEnvelope(adapter, envelope, drwaSyncMaxOperations, testDRWACallerAddress(drwaSyncCallerAuthAdmin))
+	if err == nil || err.Error() != drwaSyncRejectUnauthorizedCaller {
+		t.Fatalf("expected unauthorized caller rejection for auth_admin domain/op mismatch, got %v", err)
 	}
 }
 
@@ -236,7 +424,7 @@ func TestIntegrationBinaryPipelineHashMismatch(t *testing.T) {
 	}
 
 	adapter := newMockDRWASyncStateAdapter()
-	_, err = applyDRWASyncEnvelope(adapter, envelope, drwaSyncMaxOperations, []byte("policy_registry"))
+	_, err = applyDRWASyncEnvelope(adapter, envelope, drwaSyncMaxOperations, testDRWACallerAddress(drwaSyncCallerPolicyRegistry))
 	if err == nil || err.Error() != drwaSyncRejectHashMismatch {
 		t.Fatalf("expected hash mismatch rejection, got %v", err)
 	}
@@ -300,7 +488,7 @@ func TestIntegrationBinaryPipelineCallerDomainOperationMismatch(t *testing.T) {
 	}
 
 	adapter := newMockDRWASyncStateAdapter()
-	_, err = applyDRWASyncEnvelope(adapter, envelope, drwaSyncMaxOperations, []byte("policy_registry"))
+	_, err = applyDRWASyncEnvelope(adapter, envelope, drwaSyncMaxOperations, testDRWACallerAddress(drwaSyncCallerPolicyRegistry))
 	if err == nil || err.Error() != drwaSyncRejectUnauthorizedCaller {
 		t.Fatalf("expected unauthorized caller rejection for domain/op mismatch, got %v", err)
 	}
@@ -321,7 +509,7 @@ func TestIntegrationBinaryPipelineVersionGapRejection(t *testing.T) {
 	}
 
 	adapter := newMockDRWASyncStateAdapter()
-	_, err = applyDRWASyncEnvelope(adapter, envelope, drwaSyncMaxOperations, []byte("policy_registry"))
+	_, err = applyDRWASyncEnvelope(adapter, envelope, drwaSyncMaxOperations, testDRWACallerAddress(drwaSyncCallerPolicyRegistry))
 	if err == nil || err.Error() != drwaSyncRejectVersionGap {
 		t.Fatalf("expected version gap rejection, got %v", err)
 	}
@@ -350,7 +538,7 @@ func TestIntegrationBinaryPipelineAtomicRollbackOnPartialFailure(t *testing.T) {
 	}
 
 	adapter := newMockDRWASyncStateAdapter()
-	_, err = applyDRWASyncEnvelope(adapter, envelope, drwaSyncMaxOperations, []byte("policy_registry"))
+	_, err = applyDRWASyncEnvelope(adapter, envelope, drwaSyncMaxOperations, testDRWACallerAddress(drwaSyncCallerPolicyRegistry))
 	if err == nil {
 		t.Fatal("expected version gap error on second operation")
 	}
@@ -404,7 +592,7 @@ func TestIntegrationJSONPipelineTokenPolicyEndToEnd(t *testing.T) {
 	}
 
 	adapter := newMockDRWASyncStateAdapter()
-	result, err := applyDRWASyncEnvelope(adapter, decodedEnvelope, drwaSyncMaxOperations, []byte("policy_registry"))
+	result, err := applyDRWASyncEnvelope(adapter, decodedEnvelope, drwaSyncMaxOperations, testDRWACallerAddress(drwaSyncCallerPolicyRegistry))
 	if err != nil {
 		t.Fatalf(drwaIntTestMsgApply, err)
 	}
@@ -452,7 +640,7 @@ func TestIntegrationJSONPipelineHashMismatch(t *testing.T) {
 	}
 
 	adapter := newMockDRWASyncStateAdapter()
-	_, err = applyDRWASyncEnvelope(adapter, decodedEnvelope, drwaSyncMaxOperations, []byte("policy_registry"))
+	_, err = applyDRWASyncEnvelope(adapter, decodedEnvelope, drwaSyncMaxOperations, testDRWACallerAddress(drwaSyncCallerPolicyRegistry))
 	if err == nil || err.Error() != drwaSyncRejectHashMismatch {
 		t.Fatalf("expected hash mismatch rejection via JSON pipeline, got %v", err)
 	}

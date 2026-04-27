@@ -226,7 +226,7 @@ func transferAndCheckTokensMetaData(t *testing.T, isCrossShard bool, isMultiTran
 		require.Nil(t, err)
 		require.NotNil(t, txResult)
 
-		require.Equal(t, "success", txResult.Status.String())
+		require.Equalf(t, "success", txResult.Status.String(), "returnMessage=%q logs=%+v", txResult.ReturnMessage, txResult.Logs)
 
 		nonce++
 	}
@@ -256,7 +256,7 @@ func transferAndCheckTokensMetaData(t *testing.T, isCrossShard bool, isMultiTran
 		require.Nil(t, err)
 		require.NotNil(t, txResult)
 
-		require.Equal(t, "success", txResult.Status.String())
+		require.Equalf(t, "success", txResult.Status.String(), "returnMessage=%q logs=%+v", txResult.ReturnMessage, txResult.Logs)
 
 		nonce++
 	} else {
@@ -267,7 +267,7 @@ func transferAndCheckTokensMetaData(t *testing.T, isCrossShard bool, isMultiTran
 			txResult, err = cs.SendTxAndGenerateBlockTilTxIsExecuted(tx, maxNumOfBlockToGenerateWhenExecutingTx)
 			require.Nil(t, err)
 			require.NotNil(t, txResult)
-			require.Equal(t, "success", txResult.Status.String())
+			require.Equalf(t, "success", txResult.Status.String(), "returnMessage=%q logs=%+v", txResult.ReturnMessage, txResult.Logs)
 
 			nonce++
 		}
@@ -318,7 +318,7 @@ func transferAndCheckTokensMetaData(t *testing.T, isCrossShard bool, isMultiTran
 		require.Nil(t, err)
 		require.NotNil(t, txResult)
 
-		require.Equal(t, "success", txResult.Status.String())
+			require.Equalf(t, "success", txResult.Status.String(), "returnMessage=%q logs=%+v", txResult.ReturnMessage, txResult.Logs)
 	} else {
 		for _, tokenID := range tokenIDs {
 			log.Info("transfering token id", "tokenID", tokenID)

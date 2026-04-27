@@ -3,6 +3,8 @@ package hooks
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"path"
@@ -41,6 +43,13 @@ var log = logger.GetOrCreate("process/smartcontract/blockchainhook")
 
 const defaultCompiledSCPath = "compiledSCStorage"
 const executeDurationAlarmThreshold = time.Duration(50) * time.Millisecond
+
+const (
+	drwaNativeGovernanceQueryConfig uint32 = iota
+	drwaNativeGovernanceQueryProposal
+	drwaNativeGovernanceQueryAuditRecord
+	drwaNativeGovernanceQueryRecoveryLastBlock
+)
 
 // ArgBlockChainHook represents the arguments structure for the blockchain hook
 type ArgBlockChainHook struct {
@@ -156,18 +165,31 @@ func NewBlockChainHookImpl(
 }
 
 func createMapActivationEpochs(enableEpochs *config.EnableEpochs) map[uint32]struct{} {
+	mapActivationEpoch, skippedFields := collectActivationEpochs(enableEpochs)
+	for _, fieldName := range skippedFields {
+		log.Warn("createMapActivationEpochs: skipping non-uint32 enable epoch field",
+			"field", fieldName)
+	}
+
+	return mapActivationEpoch
+}
+
+func collectActivationEpochs(enableEpochs *config.EnableEpochs) (map[uint32]struct{}, []string) {
 	mapActivationEpoch := make(map[uint32]struct{})
+	skippedFields := make([]string, 0)
 
 	reflectVal := reflect.ValueOf(enableEpochs).Elem()
+	reflectType := reflectVal.Type()
 	for i := 0; i < reflectVal.NumField(); i++ {
 		f := reflectVal.Field(i)
 		epoch, ok := f.Interface().(uint32)
 		if !ok {
+			skippedFields = append(skippedFields, reflectType.Field(i).Name)
 			continue
 		}
 		mapActivationEpoch[epoch] = struct{}{}
 	}
-	return mapActivationEpoch
+	return mapActivationEpoch, skippedFields
 }
 
 func checkForNil(args ArgBlockChainHook) error {
@@ -484,6 +506,10 @@ func (bh *BlockChainHookImpl) ApplyDRWASyncEnvelopeBytes(payload []byte, callerA
 	if err != nil {
 		return err
 	}
+	if len(callerAddress) != drwaAuthorizedCallerAddressLen {
+		recordDRWAMetric(drwaMetricAuthorizedCallerMalformed)
+		return errors.New(drwaSyncRejectUnauthorizedCaller)
+	}
 
 	adapter, err := newDRWAHookStateAdapter(bh.accounts)
 	if err != nil {
@@ -501,6 +527,136 @@ func (bh *BlockChainHookImpl) ApplyDRWASyncEnvelopeBytes(payload []byte, callerA
 	)
 
 	return err
+}
+
+// GetDRWAGovernanceConfig returns the native DRWA governance configuration
+// stored for a token, when one exists. The value is read from the same system
+// account store used by the managedDRWASyncMirror recovery-governance path.
+func (bh *BlockChainHookImpl) GetDRWAGovernanceConfig(tokenID string) (*DRWAGovernanceConfig, error) {
+	store, err := newDRWAGovernanceTrieStore(bh.accounts)
+	if err != nil {
+		return nil, err
+	}
+
+	return store.GetGovernanceConfig(tokenID)
+}
+
+// GetDRWAGovernanceProposal returns a native DRWA recovery-governance proposal
+// by its 32-byte proposal ID.
+func (bh *BlockChainHookImpl) GetDRWAGovernanceProposal(proposalID []byte) (*DRWAGovernanceProposal, error) {
+	var proposalKey [32]byte
+	if len(proposalID) != len(proposalKey) {
+		return nil, errors.New("DRWA governance proposal ID must be 32 bytes")
+	}
+	copy(proposalKey[:], proposalID)
+
+	store, err := newDRWAGovernanceTrieStore(bh.accounts)
+	if err != nil {
+		return nil, err
+	}
+
+	return store.GetProposal(proposalKey)
+}
+
+// GetDRWAGovernanceAuditRecord returns the compact native DRWA governance audit
+// record preserved for an executed proposal.
+func (bh *BlockChainHookImpl) GetDRWAGovernanceAuditRecord(proposalID []byte) (*DRWAGovernanceAuditRecord, error) {
+	var proposalKey [32]byte
+	if len(proposalID) != len(proposalKey) {
+		return nil, errors.New("DRWA governance proposal ID must be 32 bytes")
+	}
+	copy(proposalKey[:], proposalID)
+
+	store, err := newDRWAGovernanceTrieStore(bh.accounts)
+	if err != nil {
+		return nil, err
+	}
+
+	return store.GetAuditRecord(proposalKey)
+}
+
+// GetDRWARecoveryLastBlock returns the last block nonce recorded for native
+// recovery_admin writes on a token. Zero means no previous recovery write is
+// recorded for that token.
+func (bh *BlockChainHookImpl) GetDRWARecoveryLastBlock(tokenID string) (uint64, error) {
+	adapter, err := newDRWAHookStateAdapter(bh.accounts)
+	if err != nil {
+		return 0, err
+	}
+
+	return adapter.GetRecoveryLastBlock(tokenID)
+}
+
+// QueryDRWANativeGovernance exposes compact native DRWA governance reads to VM
+// hooks without leaking chain-go structs into the shared VM interface. Query
+// types 0-2 return JSON encoded records; query type 3 returns an 8-byte
+// big-endian block nonce.
+func (bh *BlockChainHookImpl) QueryDRWANativeGovernance(queryType uint32, key []byte) ([]byte, error) {
+	switch queryType {
+	case drwaNativeGovernanceQueryConfig:
+		config, err := bh.GetDRWAGovernanceConfig(string(key))
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(config)
+	case drwaNativeGovernanceQueryProposal:
+		proposal, err := bh.GetDRWAGovernanceProposal(key)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(proposal)
+	case drwaNativeGovernanceQueryAuditRecord:
+		auditRecord, err := bh.GetDRWAGovernanceAuditRecord(key)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(auditRecord)
+	case drwaNativeGovernanceQueryRecoveryLastBlock:
+		lastBlock, err := bh.GetDRWARecoveryLastBlock(string(key))
+		if err != nil {
+			return nil, err
+		}
+		encoded := make([]byte, 8)
+		binary.BigEndian.PutUint64(encoded, lastBlock)
+		return encoded, nil
+	default:
+		return nil, errors.New("unknown DRWA native governance query type")
+	}
+}
+
+// IsAuthorizedDRWASyncCaller returns true when the provided address matches any
+// currently provisioned DRWA authorized caller entry stored on the system account.
+func (bh *BlockChainHookImpl) IsAuthorizedDRWASyncCaller(callerAddress []byte) bool {
+	if len(callerAddress) != drwaAuthorizedCallerAddressLen {
+		return false
+	}
+
+	adapter, err := newDRWAHookStateAdapter(bh.accounts)
+	if err != nil {
+		return false
+	}
+
+	for _, domain := range []string{
+		drwaSyncCallerAuthAdmin,
+		drwaSyncCallerPolicyRegistry,
+		drwaSyncCallerAssetManager,
+		drwaSyncCallerIdentityRegistry,
+		drwaSyncCallerAttestation,
+		drwaSyncCallerRecoveryAdmin,
+	} {
+		expectedAddress, readErr := adapter.GetAuthorizedCallerAddress(domain)
+		if readErr != nil {
+			return false
+		}
+		if len(expectedAddress) != drwaAuthorizedCallerAddressLen {
+			continue
+		}
+		if bytes.Equal(expectedAddress, callerAddress) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // CurrentTimeStamp return the timestamp from the current block

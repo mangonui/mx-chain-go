@@ -126,6 +126,8 @@ func TestPersistArtifactPartialWriteFailure(t *testing.T) {
 	saveAccountCalls := 0
 	saveKeyValueCalls := 0
 	historyErr := errors.New("history write failed")
+	var rollbackKey []byte
+	var rollbackWasNil bool
 
 	systemAccount.AccountDataHandlerCalled = func() vmcommon.AccountDataHandler {
 		return &vmmock.DataTrieTrackerStub{
@@ -133,6 +135,10 @@ func TestPersistArtifactPartialWriteFailure(t *testing.T) {
 				saveKeyValueCalls++
 				if saveKeyValueCalls == 2 {
 					return historyErr
+				}
+				if saveKeyValueCalls == 3 {
+					rollbackKey = append([]byte(nil), key...)
+					rollbackWasNil = value == nil
 				}
 				return nil
 			},
@@ -159,6 +165,9 @@ func TestPersistArtifactPartialWriteFailure(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "history write failed")
 	require.Equal(t, 0, saveAccountCalls, "SaveAccount must not be called when history key write fails")
+	require.Equal(t, 3, saveKeyValueCalls, "expected rollback write after history key failure")
+	require.True(t, rollbackWasNil, "rollback must clear latest key with nil value")
+	require.Equal(t, buildDRWARecoveryEvidenceKey([]byte("CARBON-1")), rollbackKey)
 }
 
 func TestPersistArtifactLatestKeyWriteFailure(t *testing.T) {
@@ -350,7 +359,7 @@ func TestApplyDRWASyncEnvelopeTimelockCommitFailureRollsBack(t *testing.T) {
 		RecoveryScope: []string{"CARBON-1"},
 	}
 
-	_, err = applyDRWASyncEnvelope(adapter, envelope, 16, []byte("recovery_admin"))
+	_, err = applyDRWASyncEnvelope(adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerRecoveryAdmin))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "timelock persist failed")
 }
@@ -722,7 +731,7 @@ func TestIsDRWASyncCallerAuthorizedRecoveryAdminRejectsInvalidOp(t *testing.T) {
 	// recovery_admin can do token_policy, holder_mirror, holder_mirror_delete — but NOT holder_profile
 	result := isDRWASyncCallerAuthorized(adapter, drwaSyncCallerRecoveryAdmin, []drwaSyncOperation{
 		{OperationType: drwaSyncOpHolderProfile},
-	}, []byte("recovery_admin"))
+	}, testDRWACallerAddress(drwaSyncCallerRecoveryAdmin))
 	require.False(t, result)
 }
 
@@ -731,7 +740,7 @@ func TestIsDRWASyncCallerAuthorizedAssetManagerAcceptsAssetRecord(t *testing.T) 
 
 	result := isDRWASyncCallerAuthorized(adapter, drwaSyncCallerAssetManager, []drwaSyncOperation{
 		{OperationType: drwaSyncOpAssetRecord},
-	}, []byte("asset_manager"))
+	}, testDRWACallerAddress(drwaSyncCallerAssetManager))
 	require.True(t, result)
 }
 
@@ -740,7 +749,7 @@ func TestIsDRWASyncCallerAuthorizedAssetManagerRejectsTokenPolicy(t *testing.T) 
 
 	result := isDRWASyncCallerAuthorized(adapter, drwaSyncCallerAssetManager, []drwaSyncOperation{
 		{OperationType: drwaSyncOpTokenPolicy},
-	}, []byte("asset_manager"))
+	}, testDRWACallerAddress(drwaSyncCallerAssetManager))
 	require.False(t, result)
 }
 
@@ -751,24 +760,36 @@ func TestIsDRWASyncCallerAuthorizedAssetManagerRejectsTokenPolicy(t *testing.T) 
 // plainSyncAdapter only implements drwaSyncStateAdapter, NOT drwaMigrationStateReader.
 type plainSyncAdapter struct{}
 
-func (p *plainSyncAdapter) GetTokenPolicyVersion(string) (uint64, error)                       { return 0, nil }
-func (p *plainSyncAdapter) GetAssetRecordVersion(string) (uint64, error)                       { return 0, nil }
-func (p *plainSyncAdapter) GetHolderMirrorVersion(string, string) (uint64, error)              { return 0, nil }
-func (p *plainSyncAdapter) GetHolderProfileVersion(string) (uint64, error)                     { return 0, nil }
-func (p *plainSyncAdapter) GetHolderAuditorAuthorizationVersion(string, string) (uint64, error) { return 0, nil }
-func (p *plainSyncAdapter) GetAuthorizedCallerAddress(string) ([]byte, error)                  { return nil, nil }
-func (p *plainSyncAdapter) PutTokenPolicyBody(string, uint64, []byte) error                    { return nil }
-func (p *plainSyncAdapter) PutAssetRecordBody(string, uint64, []byte) error                    { return nil }
-func (p *plainSyncAdapter) PutHolderMirrorBody(string, string, uint64, []byte) error           { return nil }
-func (p *plainSyncAdapter) PutHolderProfileBody(string, uint64, []byte) error                  { return nil }
-func (p *plainSyncAdapter) PutHolderAuditorAuthorizationBody(string, string, uint64, []byte) error { return nil }
-func (p *plainSyncAdapter) DeleteHolderMirror(string, string, uint64) error                    { return nil }
-func (p *plainSyncAdapter) Snapshot() int                                                      { return 0 }
-func (p *plainSyncAdapter) Rollback(int) error                                                 { return nil }
-func (p *plainSyncAdapter) IsInterfaceNil() bool                                               { return p == nil }
+func (p *plainSyncAdapter) GetTokenPolicyVersion(string) (uint64, error)          { return 0, nil }
+func (p *plainSyncAdapter) GetAssetRecordVersion(string) (uint64, error)          { return 0, nil }
+func (p *plainSyncAdapter) GetHolderMirrorVersion(string, string) (uint64, error) { return 0, nil }
+func (p *plainSyncAdapter) GetHolderProfileVersion(string) (uint64, error)        { return 0, nil }
+func (p *plainSyncAdapter) GetHolderAuditorAuthorizationVersion(string, string) (uint64, error) {
+	return 0, nil
+}
+func (p *plainSyncAdapter) GetAuthorizedCallerAddress(string) ([]byte, error) { return nil, nil }
+func (p *plainSyncAdapter) GetAuthorizedCallerAddressVersioned(string) ([]byte, uint64, error) {
+	return nil, 0, nil
+}
+func (p *plainSyncAdapter) SetAuthorizedCallerAddressVersioned(string, []byte, uint64) error {
+	return nil
+}
+func (p *plainSyncAdapter) PutTokenPolicyBody(string, uint64, []byte) error          { return nil }
+func (p *plainSyncAdapter) PutAssetRecordBody(string, uint64, []byte) error          { return nil }
+func (p *plainSyncAdapter) PutHolderMirrorBody(string, string, uint64, []byte) error { return nil }
+func (p *plainSyncAdapter) PutHolderProfileBody(string, uint64, []byte) error        { return nil }
+func (p *plainSyncAdapter) SetDRWAActive(string) error                               { return nil }
+func (p *plainSyncAdapter) PutHolderAuditorAuthorizationBody(string, string, uint64, []byte) error {
+	return nil
+}
+func (p *plainSyncAdapter) DeleteHolderMirror(string, string, uint64) error { return nil }
+func (p *plainSyncAdapter) Snapshot() int                                   { return 0 }
+func (p *plainSyncAdapter) Rollback(int) error                              { return nil }
+func (p *plainSyncAdapter) IsInterfaceNil() bool                            { return p == nil }
 
 func TestVerifyDRWAPreRecoveryStateHashSkipsNonReader(t *testing.T) {
 	// plainSyncAdapter does NOT implement drwaMigrationStateReader — should skip.
+	resetDRWAMetrics()
 	adapter := &plainSyncAdapter{}
 	envelope := &drwaSyncEnvelope{
 		CallerDomain:         drwaSyncCallerRecoveryAdmin,
@@ -779,6 +800,9 @@ func TestVerifyDRWAPreRecoveryStateHashSkipsNonReader(t *testing.T) {
 	}
 	err := verifyDRWAPreRecoveryStateHash(adapter, envelope)
 	require.NoError(t, err, "non-migration-reader adapter should skip check")
+
+	metrics := snapshotDRWAMetrics()
+	require.Equal(t, uint64(1), metrics[drwaMetricRecoveryStateHashSkipped])
 }
 
 // ---------------------------------------------------------------------------
@@ -915,7 +939,7 @@ func TestLegacyTombstoneReenrollmentRoundTrip(t *testing.T) {
 	// Step 2: register the asset_manager authorized caller on the system
 	// account so the re-enrollment envelope can pass authorization.
 	authKey := buildDRWAAuthorizedCallerKey(drwaSyncCallerAssetManager)
-	require.NoError(t, systemAccount.AccountDataHandler().SaveKeyValue(authKey, []byte("asset_manager_addr")))
+	require.NoError(t, systemAccount.AccountDataHandler().SaveKeyValue(authKey, testDRWACallerAddress(drwaSyncCallerAssetManager)))
 
 	accountsStub := &state.AccountsStub{
 		LoadAccountCalled: func(address []byte) (vmcommon.AccountHandler, error) {
@@ -962,14 +986,14 @@ func TestLegacyTombstoneReenrollmentRoundTrip(t *testing.T) {
 	// Step 5: apply the envelope. If the legacy decoder had produced an
 	// off-by-one version, validateDRWASyncVersion would reject this with
 	// drwaSyncRejectVersionGap and the holder would be permanently stuck.
-	result, err := applyDRWASyncEnvelope(adapter, envelope, drwaSyncMaxOperations, []byte("asset_manager_addr"))
+	result, err := applyDRWASyncEnvelope(adapter, envelope, drwaSyncMaxOperations, testDRWACallerAddress(drwaSyncCallerAssetManager))
 	require.NoError(t, err, "re-enrollment from legacy tombstone must succeed")
 	require.Equal(t, 1, result.AppliedOperations)
 
 	// Step 6: confirm the holder mirror is now at the new version, and that
-	// the stored value is in the JSON wrapper format (not the legacy 8-byte
-	// format anymore). This proves the round-trip wrote new state, not just
-	// passed validation.
+	// the stored value is in the canonical wrapped format (not the legacy
+	// 8-byte tombstone anymore). This proves the round-trip wrote new state,
+	// not just passed validation.
 	newVersion, err := adapter.GetHolderMirrorVersion(f9TokenID, f9HolderAddress)
 	require.NoError(t, err)
 	require.Equal(t, f9LegacyVersion+1, newVersion)
@@ -977,12 +1001,12 @@ func TestLegacyTombstoneReenrollmentRoundTrip(t *testing.T) {
 	storedAfter, _, err := holderAccount.AccountDataHandler().RetrieveValue(mirrorKey)
 	require.NoError(t, err)
 	require.NotEmpty(t, storedAfter)
-	require.Equal(t, byte('{'), storedAfter[0], "stored value after re-enrollment must be JSON wrapper, not legacy 8-byte format")
+	require.Equal(t, drwaStoredValueBinaryV1, storedAfter[0], "stored value after re-enrollment must be canonical wrapped format, not legacy 8-byte format")
 
 	// Step 7: confirm the body is recoverable as a parseable wrapper containing
 	// the new compliance state.
-	wrapper := &drwaSyncStoredValue{}
-	require.NoError(t, json.Unmarshal(storedAfter, wrapper))
+	wrapper, err := decodeDRWASyncStoredValue(storedAfter)
+	require.NoError(t, err)
 	require.Equal(t, f9LegacyVersion+1, wrapper.Version)
 	require.Equal(t, reenrollmentBody, wrapper.Body)
 }

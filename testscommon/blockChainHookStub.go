@@ -32,6 +32,8 @@ type BlockChainHookStub struct {
 	EpochStartBlockTimeStampMsCalled        func() uint64
 	ProcessBuiltInFunctionCalled            func(input *vmcommon.ContractCallInput) (*vmcommon.VMOutput, error)
 	ApplyDRWASyncEnvelopeBytesCalled        func(payload []byte, callerAddress []byte) error
+	QueryDRWANativeGovernanceCalled         func(queryType uint32, key []byte) ([]byte, error)
+	IsAuthorizedDRWASyncCallerCalled        func(callerAddress []byte) bool
 	GetBuiltinFunctionNamesCalled           func() vmcommon.FunctionNames
 	GetBuiltinFunctionsContainerCalled      func() vmcommon.BuiltInFunctionContainer
 	GetAllStateCalled                       func(address []byte) (map[string][]byte, error)
@@ -280,6 +282,24 @@ func (stub *BlockChainHookStub) ApplyDRWASyncEnvelopeBytes(payload []byte, calle
 	}
 
 	return nil
+}
+
+// QueryDRWANativeGovernance -
+func (stub *BlockChainHookStub) QueryDRWANativeGovernance(queryType uint32, key []byte) ([]byte, error) {
+	if stub.QueryDRWANativeGovernanceCalled != nil {
+		return stub.QueryDRWANativeGovernanceCalled(queryType, key)
+	}
+
+	return nil, nil
+}
+
+// IsAuthorizedDRWASyncCaller -
+func (stub *BlockChainHookStub) IsAuthorizedDRWASyncCaller(callerAddress []byte) bool {
+	if stub.IsAuthorizedDRWASyncCallerCalled != nil {
+		return stub.IsAuthorizedDRWASyncCallerCalled(callerAddress)
+	}
+
+	return false
 }
 
 // SaveNFTMetaDataToSystemAccount -

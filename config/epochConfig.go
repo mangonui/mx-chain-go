@@ -31,6 +31,7 @@ type EnableEpochs struct {
 	StakeEnableEpoch                                         uint32
 	DoubleKeyProtectionEnableEpoch                           uint32
 	ESDTEnableEpoch                                          uint32
+	DRWAEnforcementEnableEpoch                               uint32
 	GovernanceEnableEpoch                                    uint32
 	GovernanceDisableProposeEnableEpoch                      uint32
 	GovernanceFixesEnableEpoch                               uint32

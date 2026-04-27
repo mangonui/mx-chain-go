@@ -146,6 +146,21 @@ type HeartbeatV2Config struct {
 	PeerAuthenticationTimeBetweenChecksInSec         int64
 }
 
+type DRWAAuthorizedCallersConfig struct {
+	AuthAdmin        string
+	PolicyRegistry   string
+	AssetManager     string
+	IdentityRegistry string
+	Attestation      string
+	RecoveryAdmin    string
+}
+
+type DRWAConfig struct {
+	Enabled            bool
+	KeyManagementModel string
+	AuthorizedCallers  DRWAAuthorizedCallersConfig
+}
+
 // Config will hold the entire application configuration parameters
 type Config struct {
 	MiniBlocksStorage               StorageConfig
@@ -169,14 +184,14 @@ type Config struct {
 	MetaBlockStorage StorageConfig
 	ProofsStorage    StorageConfig
 
-	AccountsTrieStorage      StorageConfig
-	PeerAccountsTrieStorage  StorageConfig
-	EvictionWaitingList      EvictionWaitingListConfig
-	StateTriesConfig         StateTriesConfig
+	AccountsTrieStorage          StorageConfig
+	PeerAccountsTrieStorage      StorageConfig
+	EvictionWaitingList          EvictionWaitingListConfig
+	StateTriesConfig             StateTriesConfig
 	StateAccessesCollectorConfig StateAccessesCollectorConfig
-	TrieStorageManagerConfig TrieStorageManagerConfig
-	TrieLeavesRetrieverConfig TrieLeavesRetrieverConfig
-	BadBlocksCache           CacheConfig
+	TrieStorageManagerConfig     TrieStorageManagerConfig
+	TrieLeavesRetrieverConfig    TrieLeavesRetrieverConfig
+	BadBlocksCache               CacheConfig
 
 	TxBlockBodyDataPool         CacheConfig
 	PeerBlockBodyDataPool       CacheConfig
@@ -211,6 +226,7 @@ type Config struct {
 	HeartbeatV2          HeartbeatV2Config
 	ValidatorStatistics  ValidatorStatisticsConfig
 	GeneralSettings      GeneralSettingsConfig
+	DRWA                 DRWAConfig
 	Consensus            ConsensusConfig
 	StoragePruning       StoragePruningConfig
 	LogsAndEvents        LogsAndEventsConfig

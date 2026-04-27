@@ -3,13 +3,15 @@ package hooks
 import (
 	"errors"
 
+	coredrwa "github.com/multiversx/mx-chain-core-go/data/drwa"
 	builtInFunctions "github.com/multiversx/mx-chain-vm-common-go/builtInFunctions"
 )
 
 var (
-	errDRWARecoveryTimelockActive  = errors.New(drwaSyncRejectRecoveryTimelock)
-	errDRWARecoveryStateChanged    = errors.New(drwaSyncRejectRecoveryStateChanged)
-	errDRWASyncMissingPayloadHash  = errors.New(drwaSyncRejectMissingPayloadHash)
+	errDRWARecoveryTimelockActive     = errors.New(drwaSyncRejectRecoveryTimelock)
+	errDRWARecoveryStateChanged       = errors.New(drwaSyncRejectRecoveryStateChanged)
+	errDRWASyncMissingPayloadHash     = errors.New(drwaSyncRejectMissingPayloadHash)
+	errDRWARecoveryGovernanceRequired = errors.New(drwaSyncGovernanceRequired)
 )
 
 // Validate at startup that the prefix constants in this module match
@@ -37,14 +39,15 @@ func init() {
 type drwaSyncOperationType string
 
 const (
-	drwaSyncOpTokenPolicy          drwaSyncOperationType = "token_policy"
-	drwaSyncOpAssetRecord          drwaSyncOperationType = "asset_record"
-	drwaSyncOpHolderMirror         drwaSyncOperationType = "holder_mirror"
-	drwaSyncOpHolderProfile        drwaSyncOperationType = "holder_profile"
-	drwaSyncOpHolderAuditorAuth    drwaSyncOperationType = "holder_auditor_authorization"
-	drwaSyncOpHolderMirrorDelete   drwaSyncOperationType = "holder_mirror_delete"
-	drwaSyncOpGovernanceApprove    drwaSyncOperationType = "drwa_governance_approve"
-	drwaSyncOpGovernanceExecute    drwaSyncOperationType = "drwa_governance_execute"
+	drwaSyncOpTokenPolicy            drwaSyncOperationType = "token_policy"
+	drwaSyncOpAssetRecord            drwaSyncOperationType = "asset_record"
+	drwaSyncOpHolderMirror           drwaSyncOperationType = "holder_mirror"
+	drwaSyncOpHolderProfile          drwaSyncOperationType = "holder_profile"
+	drwaSyncOpHolderAuditorAuth      drwaSyncOperationType = "holder_auditor_authorization"
+	drwaSyncOpHolderMirrorDelete     drwaSyncOperationType = "holder_mirror_delete"
+	drwaSyncOpGovernanceApprove      drwaSyncOperationType = "drwa_governance_approve"
+	drwaSyncOpGovernanceExecute      drwaSyncOperationType = "drwa_governance_execute"
+	drwaSyncOpAuthorizedCallerUpdate drwaSyncOperationType = "authorized_caller_update"
 )
 
 const (
@@ -53,22 +56,23 @@ const (
 	drwaSyncCallerIdentityRegistry = "identity_registry"
 	drwaSyncCallerAttestation      = "attestation"
 	drwaSyncCallerRecoveryAdmin    = "recovery_admin"
+	drwaSyncCallerAuthAdmin        = "auth_admin"
 )
 
 const (
-	drwaSyncRejectUnauthorizedCaller  = "DRWA_SYNC_UNAUTHORIZED_CALLER"
-	drwaSyncRejectPayloadTooLarge     = "DRWA_SYNC_PAYLOAD_TOO_LARGE"
-	drwaSyncRejectHashMismatch        = "DRWA_SYNC_HASH_MISMATCH"
-	drwaSyncRejectReplayStale         = "DRWA_SYNC_REPLAY_STALE"
-	drwaSyncRejectReplayDuplicate     = "DRWA_SYNC_REPLAY_DUPLICATE"
-	drwaSyncRejectVersionOverflow     = "DRWA_SYNC_VERSION_OVERFLOW"
-	drwaSyncRejectVersionGap          = "DRWA_SYNC_VERSION_GAP"
-	drwaSyncRejectBatchAtomicity      = "DRWA_SYNC_BATCH_ATOMICITY_ABORT"
-	drwaSyncRejectMissingPayloadHash  = "DRWA_SYNC_MISSING_PAYLOAD_HASH"
-	drwaSyncRejectRecoveryTimelock      = "DRWA_SYNC_RECOVERY_TIMELOCK_ACTIVE"
-	drwaSyncRejectRecoveryStateChanged  = "DRWA_SYNC_RECOVERY_STATE_CHANGED"
-	drwaSyncRejectRecoveryScopeRequired   = "DRWA_SYNC_RECOVERY_SCOPE_REQUIRED"
-	drwaSyncRejectRecoveryScopeViolation  = "DRWA_SYNC_RECOVERY_SCOPE_VIOLATION"
+	drwaSyncRejectUnauthorizedCaller     = "DRWA_SYNC_UNAUTHORIZED_CALLER"
+	drwaSyncRejectPayloadTooLarge        = "DRWA_SYNC_PAYLOAD_TOO_LARGE"
+	drwaSyncRejectHashMismatch           = "DRWA_SYNC_HASH_MISMATCH"
+	drwaSyncRejectReplayStale            = "DRWA_SYNC_REPLAY_STALE"
+	drwaSyncRejectReplayDuplicate        = "DRWA_SYNC_REPLAY_DUPLICATE"
+	drwaSyncRejectVersionOverflow        = "DRWA_SYNC_VERSION_OVERFLOW"
+	drwaSyncRejectVersionGap             = "DRWA_SYNC_VERSION_GAP"
+	drwaSyncRejectBatchAtomicity         = "DRWA_SYNC_BATCH_ATOMICITY_ABORT"
+	drwaSyncRejectMissingPayloadHash     = "DRWA_SYNC_MISSING_PAYLOAD_HASH"
+	drwaSyncRejectRecoveryTimelock       = "DRWA_SYNC_RECOVERY_TIMELOCK_ACTIVE"
+	drwaSyncRejectRecoveryStateChanged   = "DRWA_SYNC_RECOVERY_STATE_CHANGED"
+	drwaSyncRejectRecoveryScopeRequired  = "DRWA_SYNC_RECOVERY_SCOPE_REQUIRED"
+	drwaSyncRejectRecoveryScopeViolation = "DRWA_SYNC_RECOVERY_SCOPE_VIOLATION"
 	// F1 (closes N3 + N7): recovery_admin envelopes must contain exactly one
 	// token in scope. Multi-token recovery would let governance routing decide
 	// on the first token while the apply path mutates all of them, and would
@@ -77,19 +81,23 @@ const (
 	// produces (buildDRWAMigrationEnvelope, buildDRWARecoveryEnvelope), so
 	// this restriction matches the actual usage model.
 	drwaSyncRejectRecoveryScopeMultiToken = "DRWA_SYNC_RECOVERY_SCOPE_MULTI_TOKEN"
-	drwaSyncGovernanceRequired           = "DRWA_SYNC_GOVERNANCE_REQUIRED"
-	drwaSyncGovernanceProposalCreated    = "DRWA_SYNC_GOVERNANCE_PROPOSAL_CREATED"
+	drwaSyncGovernanceRequired            = "DRWA_SYNC_GOVERNANCE_REQUIRED"
+	drwaSyncGovernanceProposalCreated     = "DRWA_SYNC_GOVERNANCE_PROPOSAL_CREATED"
+)
+
+const (
+	drwaMetricRecoveryGovernanceRequired = "recovery_governance_required"
 )
 
 const (
 	// MUST match DRWATokenPolicyPrefix et al. in
 	// mx-chain-vm-common-go/builtInFunctions/drwa.go.
 	// Validated at startup by init(); panics on divergence.
-	drwaSyncTokenPolicyPrefix       = "drwa:token:"
-	drwaSyncAssetRecordPrefix       = "drwa:asset:"
-	drwaSyncHolderMirrorPrefix      = "drwa:holder:"
-	drwaSyncHolderProfilePrefix     = "drwa:profile:"
-	drwaSyncHolderAuditorAuthPrefix = "drwa:auditor:"
+	drwaSyncTokenPolicyPrefix       = string(coredrwa.TokenPolicyPrefix)
+	drwaSyncAssetRecordPrefix       = string(coredrwa.AssetRecordPrefix)
+	drwaSyncHolderMirrorPrefix      = string(coredrwa.HolderMirrorPrefix)
+	drwaSyncHolderProfilePrefix     = string(coredrwa.HolderProfilePrefix)
+	drwaSyncHolderAuditorAuthPrefix = string(coredrwa.HolderAuditorAuthPrefix)
 	drwaSyncMaxOperations           = 256
 	// 1 MB payload limit. With 256 max operations x ~4KB average per
 	// holder mirror (token ID + address + compliance fields + body), this
@@ -110,6 +118,9 @@ const (
 	// drwaSyncMaxHolderLen caps holder address length. Bech32 addresses are
 	// 62 chars; hex-encoded 32-byte addresses are 64 chars.
 	drwaSyncMaxHolderLen = 128
+
+	drwaSyncEnvelopeSchemaVersion             uint16 = 1
+	drwaSyncEnvelopeSchemaVersionWithRecovery uint16 = 2
 )
 
 // Multi-sig governance for sync operations.
@@ -123,20 +134,10 @@ const (
 //      a routing layer above isDRWASyncCallerAuthorized invokes it via the
 //      optional drwaSyncGovernanceProvider interface (see maybeRouteToGovernance).
 //
-// KNOWN PRODUCTION GAP (audit finding N5):
-//   The production drwaHookStateAdapter does not implement
-//   drwaSyncGovernanceProvider, so the M-of-N routing layer is unreachable
-//   from BlockChainHookImpl.ApplyDRWASyncEnvelopeBytes. Every recovery_admin
-//   envelope falls through to single-key authorization with the
-//   governance_bypass_single_key_recovery metric.
-//
-//   Activating M-of-N for production requires (per audit memo F5):
-//     - drwaHookStateAdapter implements drwaSyncGovernanceProvider
-//     - DRWAGovernanceEngine instantiated in ApplyDRWASyncEnvelopeBytes
-//     - Compile-time assertion (mirroring drwaSyncRecoveryTimelockProvider)
-//     - DRWAGovernanceConfig version monotonicity (audit finding N6)
-//     - Binary tag values for drwa_governance_approve / drwa_governance_execute
-//     - A production caller for SaveGovernanceConfig (audit finding N8)
+// PRODUCTION STATE:
+//   The production drwaHookStateAdapter implements drwaSyncGovernanceProvider,
+//   so recovery_admin envelopes now route through governance when a config is
+//   present, and fail closed with DRWA_SYNC_GOVERNANCE_REQUIRED otherwise.
 //
 // Compensating controls active today:
 //   1. Recovery timelock rate-limits writes (drwaSyncRecoveryTimelockBlocks = 600 blocks).
@@ -154,10 +155,11 @@ const (
 // Signers, ProposalTTL, MaxSigners; Version field pending N6 fix).
 
 type drwaSyncEnvelope struct {
-	CallerDomain string              `json:"caller_domain"`
-	PayloadHash  []byte              `json:"payload_hash"`
-	Operations   []drwaSyncOperation `json:"operations"`
-	Noop         bool                `json:"noop,omitempty"`
+	SchemaVersion uint16              `json:"schema_version"`
+	CallerDomain  string              `json:"caller_domain"`
+	PayloadHash   []byte              `json:"payload_hash"`
+	Operations    []drwaSyncOperation `json:"operations"`
+	Noop          bool                `json:"noop,omitempty"`
 	// PreRecoveryStateHash binds a recovery_admin envelope to the on-chain
 	// state that was inspected when the envelope was built. If state changes
 	// between inspection and apply, the hash mismatch rejects the apply.
@@ -180,6 +182,11 @@ type drwaSyncOperation struct {
 type drwaSyncStoredValue struct {
 	Version uint64 `json:"version"`
 	Body    []byte `json:"body"`
+}
+
+type drwaAuthorizedCallerRecord struct {
+	Version uint64 `json:"version"`
+	Address []byte `json:"address"`
 }
 
 type drwaSyncApplyResult struct {

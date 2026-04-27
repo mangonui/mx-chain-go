@@ -4,20 +4,26 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/multiversx/mx-chain-core-go/core"
+	"github.com/multiversx/mx-chain-go/testscommon/state"
+	vmcommon "github.com/multiversx/mx-chain-vm-common-go"
+	vmmock "github.com/multiversx/mx-chain-vm-common-go/mock"
 	"github.com/stretchr/testify/require"
 )
 
 // --- In-memory governance store for testing ---
 
 type mockGovernanceStore struct {
-	configs   map[string]*DRWAGovernanceConfig
-	proposals map[[32]byte]*DRWAGovernanceProposal
+	configs      map[string]*DRWAGovernanceConfig
+	proposals    map[[32]byte]*DRWAGovernanceProposal
+	auditRecords map[[32]byte]*DRWAGovernanceAuditRecord
 }
 
 func newMockGovernanceStore() *mockGovernanceStore {
 	return &mockGovernanceStore{
-		configs:   make(map[string]*DRWAGovernanceConfig),
-		proposals: make(map[[32]byte]*DRWAGovernanceProposal),
+		configs:      make(map[string]*DRWAGovernanceConfig),
+		proposals:    make(map[[32]byte]*DRWAGovernanceProposal),
+		auditRecords: make(map[[32]byte]*DRWAGovernanceAuditRecord),
 	}
 }
 
@@ -26,11 +32,31 @@ func (s *mockGovernanceStore) GetGovernanceConfig(tokenID string) (*DRWAGovernan
 	if !ok {
 		return nil, nil
 	}
-	return cfg, nil
+	return cloneDRWAGovernanceConfig(cfg), nil
 }
 
-func (s *mockGovernanceStore) SaveGovernanceConfig(tokenID string, cfg *DRWAGovernanceConfig) error {
-	s.configs[tokenID] = cfg
+func (s *mockGovernanceStore) SaveGovernanceConfig(tokenID string, cfg *DRWAGovernanceConfig, expectedVersion ...uint64) error {
+	if cfg == nil {
+		return errDRWAGovernanceNilStore
+	}
+
+	currentVersion := uint64(0)
+	if existing, ok := s.configs[tokenID]; ok && existing != nil {
+		currentVersion = existing.Version
+	}
+
+	matchVersion := cfg.Version
+	if len(expectedVersion) > 0 {
+		matchVersion = expectedVersion[0]
+	}
+	if matchVersion != currentVersion {
+		return errDRWAGovernanceConfigVersionMismatch
+	}
+
+	cloned := cloneDRWAGovernanceConfig(cfg)
+	cloned.Version = currentVersion + 1
+	s.configs[tokenID] = cloned
+	cfg.Version = cloned.Version
 	return nil
 }
 
@@ -50,6 +76,23 @@ func (s *mockGovernanceStore) SaveProposal(proposal *DRWAGovernanceProposal) err
 func (s *mockGovernanceStore) DeleteProposal(proposalID [32]byte) error {
 	delete(s.proposals, proposalID)
 	return nil
+}
+
+// M-14: mock implementations for the audit-record methods.
+func (s *mockGovernanceStore) SaveAuditRecord(record *DRWAGovernanceAuditRecord) error {
+	if record == nil {
+		return errDRWAGovernanceProposalNotFound
+	}
+	s.auditRecords[record.ProposalID] = record
+	return nil
+}
+
+func (s *mockGovernanceStore) GetAuditRecord(proposalID [32]byte) (*DRWAGovernanceAuditRecord, error) {
+	rec, ok := s.auditRecords[proposalID]
+	if !ok {
+		return nil, nil
+	}
+	return rec, nil
 }
 
 // --- Test helpers ---
@@ -89,6 +132,123 @@ func makeTestRecoveryEnvelope(tokenID string) drwaSyncEnvelope {
 		Operations:    ops,
 		RecoveryScope: []string{tokenID},
 	}
+}
+
+func TestGovernanceTrieStoreConfigRoundTrip(t *testing.T) {
+	systemAccount := vmmock.NewAccountWrapMock(core.SystemAccountAddress)
+	accountsStub := &state.AccountsStub{
+		LoadAccountCalled: func(address []byte) (vmcommon.AccountHandler, error) {
+			if string(address) == string(core.SystemAccountAddress) {
+				return systemAccount, nil
+			}
+			return vmmock.NewAccountWrapMock(address), nil
+		},
+		SaveAccountCalled: func(account vmcommon.AccountHandler) error { return nil },
+	}
+
+	store, err := newDRWAGovernanceTrieStore(accountsStub)
+	require.NoError(t, err)
+
+	cfg := make3of5Config()
+	require.NoError(t, store.SaveGovernanceConfig("TOKEN-store", cfg))
+
+	got, err := store.GetGovernanceConfig("TOKEN-store")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, uint64(1), got.Version)
+	require.Equal(t, cfg.Threshold, got.Threshold)
+	require.Equal(t, cfg.ProposalTTL, got.ProposalTTL)
+	require.Equal(t, cfg.MaxSigners, got.MaxSigners)
+	require.Equal(t, len(cfg.Signers), len(got.Signers))
+}
+
+func TestBlockChainHookQueryDRWANativeGovernanceConfig(t *testing.T) {
+	systemAccount := vmmock.NewAccountWrapMock(core.SystemAccountAddress)
+	accountsStub := &state.AccountsStub{
+		LoadAccountCalled: func(address []byte) (vmcommon.AccountHandler, error) {
+			if string(address) == string(core.SystemAccountAddress) {
+				return systemAccount, nil
+			}
+			return vmmock.NewAccountWrapMock(address), nil
+		},
+		SaveAccountCalled: func(account vmcommon.AccountHandler) error { return nil },
+	}
+
+	store, err := newDRWAGovernanceTrieStore(accountsStub)
+	require.NoError(t, err)
+	require.NoError(t, store.SaveGovernanceConfig("TOKEN-query", make3of5Config()))
+
+	hook := &BlockChainHookImpl{accounts: accountsStub}
+	encoded, err := hook.QueryDRWANativeGovernance(drwaNativeGovernanceQueryConfig, []byte("TOKEN-query"))
+	require.NoError(t, err)
+	require.Contains(t, string(encoded), `"threshold":3`)
+	require.Contains(t, string(encoded), `"proposal_ttl":2400`)
+}
+
+func TestGovernanceTrieStoreConfigRejectsVersionMismatch(t *testing.T) {
+	systemAccount := vmmock.NewAccountWrapMock(core.SystemAccountAddress)
+	accountsStub := &state.AccountsStub{
+		LoadAccountCalled: func(address []byte) (vmcommon.AccountHandler, error) {
+			if string(address) == string(core.SystemAccountAddress) {
+				return systemAccount, nil
+			}
+			return vmmock.NewAccountWrapMock(address), nil
+		},
+		SaveAccountCalled: func(account vmcommon.AccountHandler) error { return nil },
+	}
+
+	store, err := newDRWAGovernanceTrieStore(accountsStub)
+	require.NoError(t, err)
+
+	cfg := make3of5Config()
+	require.NoError(t, store.SaveGovernanceConfig("TOKEN-store", cfg))
+
+	stale := make3of5Config()
+	err = store.SaveGovernanceConfig("TOKEN-store", stale)
+	require.ErrorIs(t, err, errDRWAGovernanceConfigVersionMismatch)
+}
+
+func TestGovernanceTrieStoreProposalRoundTripAndDelete(t *testing.T) {
+	systemAccount := vmmock.NewAccountWrapMock(core.SystemAccountAddress)
+	accountsStub := &state.AccountsStub{
+		LoadAccountCalled: func(address []byte) (vmcommon.AccountHandler, error) {
+			if string(address) == string(core.SystemAccountAddress) {
+				return systemAccount, nil
+			}
+			return vmmock.NewAccountWrapMock(address), nil
+		},
+		SaveAccountCalled: func(account vmcommon.AccountHandler) error { return nil },
+	}
+
+	store, err := newDRWAGovernanceTrieStore(accountsStub)
+	require.NoError(t, err)
+
+	proposalID := [32]byte{1, 2, 3}
+	proposal := &DRWAGovernanceProposal{
+		ProposalID:      proposalID,
+		EnvelopeHash:    [32]byte{9, 9, 9},
+		Proposer:        []byte("signer"),
+		Approvals:       [][]byte{[]byte("signer")},
+		CreatedAtBlock:  100,
+		Executed:        false,
+		EnvelopePayload: []byte(`{"caller_domain":"recovery_admin"}`),
+	}
+
+	require.NoError(t, store.SaveProposal(proposal))
+
+	got, err := store.GetProposal(proposalID)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, proposal.ProposalID, got.ProposalID)
+	require.Equal(t, proposal.CreatedAtBlock, got.CreatedAtBlock)
+	require.Equal(t, proposal.Approvals, got.Approvals)
+	require.Equal(t, proposal.EnvelopePayload, got.EnvelopePayload)
+
+	require.NoError(t, store.DeleteProposal(proposalID))
+
+	got, err = store.GetProposal(proposalID)
+	require.NoError(t, err)
+	require.Nil(t, got)
 }
 
 // --- Config Validation Tests ---
@@ -267,6 +427,37 @@ func TestGovernanceDuplicateApprovalRejected(t *testing.T) {
 	require.ErrorIs(t, err, errDRWAGovernanceDuplicateApproval)
 }
 
+func TestGovernanceProposalIDCollisionRejected(t *testing.T) {
+	store := newMockGovernanceStore()
+	engine := NewDRWAGovernanceEngine(store)
+	tokenID := "TOKEN-collision"
+	cfg := make3of5Config()
+	require.NoError(t, store.SaveGovernanceConfig(tokenID, cfg))
+
+	envelope := makeTestRecoveryEnvelope(tokenID)
+	signers := cfg.Signers
+
+	firstProposalID, err := engine.ProposeRecoveryOperation(signers[0], envelope, 1000)
+	require.NoError(t, err)
+
+	expectedHash, err := computeDRWASyncHash(envelope.CallerDomain, envelope.Operations)
+	require.NoError(t, err)
+	var expectedEnvHash [32]byte
+	copy(expectedEnvHash[:], expectedHash)
+	require.Equal(t, firstProposalID, computeProposalID(expectedEnvHash, 1000))
+
+	secondProposalID, err := engine.ProposeRecoveryOperation(signers[1], envelope, 1000)
+	require.ErrorIs(t, err, errDRWAGovernanceProposalIDCollision)
+	require.Equal(t, [32]byte{}, secondProposalID)
+
+	stored, err := store.GetProposal(firstProposalID)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.True(t, bytes.Equal(signers[0], stored.Proposer))
+	require.Len(t, stored.Approvals, 1)
+	require.True(t, bytes.Equal(signers[0], stored.Approvals[0]))
+}
+
 // --- Expired Proposal Rejection ---
 
 func TestGovernanceExpiredProposalRejected(t *testing.T) {
@@ -289,6 +480,29 @@ func TestGovernanceExpiredProposalRejected(t *testing.T) {
 	// Execute at block 1101 — TTL of 100 expired (created at 1000, deadline = 1100).
 	_, err = engine.ExecuteRecoveryOperation(signers[3], proposalID, 1101)
 	require.ErrorIs(t, err, errDRWAGovernanceProposalExpired)
+}
+
+func TestGovernanceExpiredProposalRejectsLateApproval(t *testing.T) {
+	store := newMockGovernanceStore()
+	engine := NewDRWAGovernanceEngine(store)
+	tokenID := "TOKEN-exp-approve"
+	cfg := make3of5Config()
+	cfg.ProposalTTL = 100
+	require.NoError(t, store.SaveGovernanceConfig(tokenID, cfg))
+
+	envelope := makeTestRecoveryEnvelope(tokenID)
+	signers := cfg.Signers
+
+	proposalID, err := engine.ProposeRecoveryOperation(signers[0], envelope, 1000)
+	require.NoError(t, err)
+
+	err = engine.ApproveRecoveryOperation(signers[1], proposalID, 1101)
+	require.ErrorIs(t, err, errDRWAGovernanceProposalExpired)
+
+	stored, err := store.GetProposal(proposalID)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.Len(t, stored.Approvals, 1)
 }
 
 // --- Insufficient Approvals Rejection ---
@@ -460,12 +674,16 @@ func TestIsSignerAuthorized(t *testing.T) {
 	require.False(t, engine.IsSignerAuthorized(cfg.Signers[0], "UNKNOWN-TOKEN"))
 }
 
-// --- Backward Compatibility: No Governance Config -> Single-Key Works ---
+// --- No Governance Config -> Fail Closed ---
 
-func TestBackwardCompatibilityNoGovernanceConfig(t *testing.T) {
-	// When no governance config exists for a token, recovery_admin should
-	// work exactly as before via the standard applyDRWASyncEnvelope path.
-	adapter := newMockDRWASyncStateAdapter()
+func TestRecoveryAdminNoGovernanceConfigFailsClosed(t *testing.T) {
+	store := newMockGovernanceStore()
+	engine := NewDRWAGovernanceEngine(store)
+	adapter := &mockGovernanceCapableAdapter{
+		mockDRWASyncStateAdapter: newMockDRWASyncStateAdapter(),
+		engine:                   engine,
+		currentBlock:             100,
+	}
 
 	tokenID := "TOKEN-legacy"
 	ops := []drwaSyncOperation{
@@ -486,17 +704,12 @@ func TestBackwardCompatibilityNoGovernanceConfig(t *testing.T) {
 		RecoveryScope: []string{tokenID},
 	}
 
-	// The mock adapter does NOT implement drwaSyncGovernanceProvider,
-	// so maybeRouteToGovernance returns (nil, false, nil) — falls through
-	// to single-key recovery path.
-	result, err := applyDRWASyncEnvelope(adapter, envelope, drwaSyncMaxOperations, []byte("recovery_admin"))
-	require.NoError(t, err)
-	require.Equal(t, 1, result.AppliedOperations)
-	require.False(t, result.GovernancePending)
-	require.Equal(t, [32]byte{}, result.GovernanceProposalID)
+	result, err := applyDRWASyncEnvelope(adapter, envelope, drwaSyncMaxOperations, testDRWACallerAddress(drwaSyncCallerRecoveryAdmin))
+	require.ErrorIs(t, err, errDRWARecoveryGovernanceRequired)
+	require.Nil(t, result)
 
-	// Verify the operation was actually applied.
-	require.Equal(t, uint64(1), adapter.tokenVersions[tokenID])
+	// Verify nothing was applied.
+	require.Equal(t, uint64(0), adapter.tokenVersions[tokenID])
 }
 
 // --- IsGovernanceEnabled ---
@@ -720,6 +933,468 @@ func TestMaybeRouteToGovernanceWithGovernanceAdapter(t *testing.T) {
 
 // --- Integration: handleDRWAGovernanceOperation for approve/execute ---
 
+// ── B-10 (R-01-F-02) stale-approval-after-rotation regression tests ──
+
+// TestB10StaleApprovalAfterSignerRotationIsDropped is the canonical
+// regression test for R-01-F-02. Three signers (A, B, C) approve a
+// proposal, quorum is met, then the signer config is rotated to remove
+// A and B (e.g. key compromise). At execute time, A's and B's stored
+// approvals MUST be dropped; only C's approval remains valid; with
+// threshold=3 and only 1 valid approval the execute call rejects with
+// `errDRWAGovernanceThresholdNotMet`. The stale-drop metric must fire
+// twice (once per dropped approval).
+func TestB10StaleApprovalAfterSignerRotationIsDropped(t *testing.T) {
+	resetDRWAMetrics()
+	store := newMockGovernanceStore()
+	engine := NewDRWAGovernanceEngine(store)
+
+	tokenID := "TOKEN-b10-rotation"
+	cfg := make3of5Config()
+	require.NoError(t, store.SaveGovernanceConfig(tokenID, cfg))
+
+	envelope := makeTestRecoveryEnvelope(tokenID)
+	originalSigners := cfg.Signers
+
+	// Three signers approve.
+	proposalID, err := engine.ProposeRecoveryOperation(originalSigners[0], envelope, 1000)
+	require.NoError(t, err)
+	require.NoError(t, engine.ApproveRecoveryOperation(originalSigners[1], proposalID))
+	require.NoError(t, engine.ApproveRecoveryOperation(originalSigners[2], proposalID))
+
+	// Rotate the signer set: drop signers 0 and 1 (simulating rotation
+	// of two compromised keys). Keep signer 2 plus add two new signers
+	// to preserve the 5-signer / 3-threshold floor promised by the
+	// key-rotation procedure.
+	rotatedSigners := [][]byte{
+		append([]byte(nil), originalSigners[2]...),
+		append([]byte(nil), originalSigners[3]...),
+		append([]byte(nil), originalSigners[4]...),
+		makeSigners(10)[6],
+		makeSigners(10)[7],
+	}
+	rotatedCfg := &DRWAGovernanceConfig{
+		Version:     cfg.Version,
+		Threshold:   3,
+		Signers:     rotatedSigners,
+		ProposalTTL: cfg.ProposalTTL,
+		MaxSigners:  cfg.MaxSigners,
+	}
+	require.NoError(t, ValidateGovernanceConfig(rotatedCfg))
+	require.NoError(t, store.SaveGovernanceConfig(tokenID, rotatedCfg))
+
+	// A current signer attempts execute. Only the still-valid approver
+	// (signer 2) remains; threshold 3 is no longer met.
+	_, err = engine.ExecuteRecoveryOperation(rotatedSigners[0], proposalID, 1010)
+	require.ErrorIs(t, err, errDRWAGovernanceThresholdNotMet)
+
+	// Verify the stale-drop metric fired exactly twice (signers 0 and 1).
+	metrics := snapshotDRWAMetrics()
+	require.Equal(
+		t,
+		uint64(2),
+		metrics[drwaMetricGovernanceApprovalStaleAfterRotation],
+		"two stale approvals must be reported",
+	)
+
+	// Verify the proposal is NOT marked executed (rejection happened
+	// before the persist-and-execute step).
+	stored, err := store.GetProposal(proposalID)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.False(t, stored.Executed)
+}
+
+// TestB10PartialRotationPreservesValidApprovals covers the case where
+// enough approvals survive the rotation to still meet threshold. Three
+// signers approve with threshold=3, then only signer A is rotated out,
+// but a new signer is added so the 5-signer floor holds. Even though
+// one approval is dropped, 2 approvals remain — still below threshold
+// so the execute must reject. We also assert that the stored proposal
+// has its Approvals list compacted to only the surviving entries so
+// later reads reflect post-rotation truth.
+func TestB10PartialRotationCompactsStoredApprovals(t *testing.T) {
+	resetDRWAMetrics()
+	store := newMockGovernanceStore()
+	engine := NewDRWAGovernanceEngine(store)
+
+	tokenID := "TOKEN-b10-partial"
+	cfg := make3of5Config()
+	// Lower threshold to 2 so the post-rotation survivor count (2 valid
+	// approvals) still meets threshold and the happy path executes.
+	cfg.Threshold = 2
+	require.NoError(t, store.SaveGovernanceConfig(tokenID, cfg))
+
+	envelope := makeTestRecoveryEnvelope(tokenID)
+	original := cfg.Signers
+
+	// Three approvals: 0 (proposer), 1, 2.
+	proposalID, err := engine.ProposeRecoveryOperation(original[0], envelope, 1000)
+	require.NoError(t, err)
+	require.NoError(t, engine.ApproveRecoveryOperation(original[1], proposalID))
+	require.NoError(t, engine.ApproveRecoveryOperation(original[2], proposalID))
+
+	// Rotate out signer 0 only; keep 1..4 and add a new signer to
+	// replace 0.
+	extra := makeSigners(10)[7]
+	rotatedSigners := [][]byte{
+		append([]byte(nil), original[1]...),
+		append([]byte(nil), original[2]...),
+		append([]byte(nil), original[3]...),
+		append([]byte(nil), original[4]...),
+		extra,
+	}
+	rotatedCfg := &DRWAGovernanceConfig{
+		Version:     cfg.Version,
+		Threshold:   2,
+		Signers:     rotatedSigners,
+		ProposalTTL: cfg.ProposalTTL,
+		MaxSigners:  cfg.MaxSigners,
+	}
+	require.NoError(t, ValidateGovernanceConfig(rotatedCfg))
+	require.NoError(t, store.SaveGovernanceConfig(tokenID, rotatedCfg))
+
+	// Execute with a current signer. 2 surviving approvals >= threshold=2
+	// → must succeed.
+	_, err = engine.ExecuteRecoveryOperation(rotatedSigners[0], proposalID, 1010)
+	require.NoError(t, err)
+
+	// Metric must fire exactly once (signer 0 dropped).
+	metrics := snapshotDRWAMetrics()
+	require.Equal(
+		t,
+		uint64(1),
+		metrics[drwaMetricGovernanceApprovalStaleAfterRotation],
+		"exactly one stale approval must be reported",
+	)
+
+	// The stored proposal's Approvals slice must be compacted to
+	// only the surviving approvers (signers 1 and 2). No rotated-out
+	// signer may remain in the recorded approvals list.
+	stored, err := store.GetProposal(proposalID)
+	require.NoError(t, err)
+	require.True(t, stored.Executed)
+	require.Len(t, stored.Approvals, 2)
+	for _, approval := range stored.Approvals {
+		require.True(
+			t,
+			isGovernanceSigner(approval, rotatedSigners),
+			"persisted approvals must be a subset of the current signer set",
+		)
+	}
+}
+
+// TestB10NoRotationDoesNotTriggerStaleDrops guards against a false-
+// positive: the stale-drop metric must NOT fire when the signer set is
+// unchanged between propose and execute. This is the happy path every
+// real deployment takes on the overwhelming majority of recovery
+// operations and it must be regression-safe.
+func TestB10NoRotationDoesNotTriggerStaleDrops(t *testing.T) {
+	resetDRWAMetrics()
+	store := newMockGovernanceStore()
+	engine := NewDRWAGovernanceEngine(store)
+
+	tokenID := "TOKEN-b10-no-rotation"
+	cfg := make3of5Config()
+	require.NoError(t, store.SaveGovernanceConfig(tokenID, cfg))
+
+	envelope := makeTestRecoveryEnvelope(tokenID)
+	signers := cfg.Signers
+
+	proposalID, err := engine.ProposeRecoveryOperation(signers[0], envelope, 1000)
+	require.NoError(t, err)
+	require.NoError(t, engine.ApproveRecoveryOperation(signers[1], proposalID))
+	require.NoError(t, engine.ApproveRecoveryOperation(signers[2], proposalID))
+
+	_, err = engine.ExecuteRecoveryOperation(signers[3], proposalID, 1010)
+	require.NoError(t, err)
+
+	metrics := snapshotDRWAMetrics()
+	require.Equal(
+		t,
+		uint64(0),
+		metrics[drwaMetricGovernanceApprovalStaleAfterRotation],
+		"no rotation → no stale-drop metric",
+	)
+}
+
+// ── M-13 (R-01-F-04) envelope-hash re-verification tests ────────────
+
+// TestM13RejectsTamperedEnvelopePayload is the canonical regression
+// test for R-01-F-04. Quorum is reached normally, but between
+// propose and execute the store's `EnvelopePayload` is mutated to
+// carry a different operation list. Execute MUST detect the
+// hash-mismatch and reject with `errDRWAGovernanceEnvelopeHashMismatch`.
+// The dedicated mismatch metric must fire exactly once. The proposal
+// must NOT flip to `Executed = true` because the reject happens before
+// the persist step.
+func TestM13RejectsTamperedEnvelopePayload(t *testing.T) {
+	resetDRWAMetrics()
+	store := newMockGovernanceStore()
+	engine := NewDRWAGovernanceEngine(store)
+
+	tokenID := "TOKEN-m13-tamper"
+	cfg := make3of5Config()
+	require.NoError(t, store.SaveGovernanceConfig(tokenID, cfg))
+
+	envelope := makeTestRecoveryEnvelope(tokenID)
+	signers := cfg.Signers
+
+	proposalID, err := engine.ProposeRecoveryOperation(signers[0], envelope, 1000)
+	require.NoError(t, err)
+	require.NoError(t, engine.ApproveRecoveryOperation(signers[1], proposalID))
+	require.NoError(t, engine.ApproveRecoveryOperation(signers[2], proposalID))
+
+	// Simulate an attacker (or buggy migration) swapping the stored
+	// payload with a semantically different envelope — same token,
+	// but a distinct operation list. The EnvelopeHash field on the
+	// proposal still reflects the ORIGINAL, propose-time operations.
+	tampered := makeTestRecoveryEnvelope(tokenID)
+	tampered.Operations[0].Body = []byte(`{"transferable":false}`)
+	tamperedPayload, err := serializeGovernanceEnvelope(&tampered)
+	require.NoError(t, err)
+	stored, err := store.GetProposal(proposalID)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	stored.EnvelopePayload = tamperedPayload
+	require.NoError(t, store.SaveProposal(stored))
+
+	// Execute must reject with the dedicated hash-mismatch error.
+	_, err = engine.ExecuteRecoveryOperation(signers[3], proposalID, 1010)
+	require.ErrorIs(t, err, errDRWAGovernanceEnvelopeHashMismatch)
+
+	// Metric fired exactly once.
+	metrics := snapshotDRWAMetrics()
+	require.Equal(
+		t,
+		uint64(1),
+		metrics[drwaMetricGovernanceEnvelopeHashMismatch],
+		"one envelope-hash mismatch must be reported",
+	)
+
+	// Proposal not executed.
+	persisted, err := store.GetProposal(proposalID)
+	require.NoError(t, err)
+	require.False(t, persisted.Executed)
+}
+
+// TestM13AcceptsUnalteredEnvelope guards against false positives: the
+// normal execute path whose payload is byte-identical to propose time
+// MUST succeed without firing the mismatch metric.
+func TestM13AcceptsUnalteredEnvelope(t *testing.T) {
+	resetDRWAMetrics()
+	store := newMockGovernanceStore()
+	engine := NewDRWAGovernanceEngine(store)
+
+	tokenID := "TOKEN-m13-untouched"
+	cfg := make3of5Config()
+	require.NoError(t, store.SaveGovernanceConfig(tokenID, cfg))
+
+	envelope := makeTestRecoveryEnvelope(tokenID)
+	signers := cfg.Signers
+
+	proposalID, err := engine.ProposeRecoveryOperation(signers[0], envelope, 1000)
+	require.NoError(t, err)
+	require.NoError(t, engine.ApproveRecoveryOperation(signers[1], proposalID))
+	require.NoError(t, engine.ApproveRecoveryOperation(signers[2], proposalID))
+
+	_, err = engine.ExecuteRecoveryOperation(signers[3], proposalID, 1010)
+	require.NoError(t, err)
+
+	metrics := snapshotDRWAMetrics()
+	require.Equal(
+		t,
+		uint64(0),
+		metrics[drwaMetricGovernanceEnvelopeHashMismatch],
+		"untouched payload must not trigger the mismatch metric",
+	)
+}
+
+// edge-cases (empty inputs, all-stale, all-valid) are locked in even if
+// the calling code changes.
+// TestB10FilterHelperEdgeCases exercises the filter helper directly so
+// edge cases (empty inputs, all-stale, all-valid, mixed) are locked
+// in even if the calling code in `ExecuteRecoveryOperation` later
+// changes shape.
+func TestB10FilterHelperEdgeCases(t *testing.T) {
+	signers := makeSigners(3)
+	outsider := []byte{0xFF, 0xFE}
+
+	// All valid.
+	valid, dropped := filterCurrentSignerApprovals(signers, signers)
+	require.Len(t, valid, 3)
+	require.Equal(t, uint32(0), dropped)
+
+	// All stale.
+	valid, dropped = filterCurrentSignerApprovals([][]byte{outsider, outsider}, signers)
+	require.Len(t, valid, 0)
+	require.Equal(t, uint32(2), dropped)
+
+	// Mixed.
+	mixed := [][]byte{signers[0], outsider, signers[1]}
+	valid, dropped = filterCurrentSignerApprovals(mixed, signers)
+	require.Len(t, valid, 2)
+	require.Equal(t, uint32(1), dropped)
+	require.True(t, bytes.Equal(valid[0], signers[0]))
+	require.True(t, bytes.Equal(valid[1], signers[1]))
+
+	// Empty approvals.
+	valid, dropped = filterCurrentSignerApprovals(nil, signers)
+	require.Len(t, valid, 0)
+	require.Equal(t, uint32(0), dropped)
+
+	// Empty signer set — all stale.
+	valid, dropped = filterCurrentSignerApprovals(signers, nil)
+	require.Len(t, valid, 0)
+	require.Equal(t, uint32(3), dropped)
+}
+
+// ── M-14 (R-01-F-05) prune-after-retention tests ────────────────────
+
+// TestM14ExecutedProposalEligibleAfterRetention verifies the happy
+// path: an executed proposal becomes eligible for pruning exactly
+// when `currentBlock >= ExecutedAtBlock + drwaGovernancePruneRetentionBlocks`.
+// Pruning removes the full proposal payload but preserves the compact
+// audit record.
+func TestM14ExecutedProposalEligibleAfterRetention(t *testing.T) {
+	resetDRWAMetrics()
+	store := newMockGovernanceStore()
+	engine := NewDRWAGovernanceEngine(store)
+
+	tokenID := "TOKEN-m14-exec"
+	cfg := make3of5Config()
+	require.NoError(t, store.SaveGovernanceConfig(tokenID, cfg))
+
+	envelope := makeTestRecoveryEnvelope(tokenID)
+	signers := cfg.Signers
+
+	proposalID, err := engine.ProposeRecoveryOperation(signers[0], envelope, 1000)
+	require.NoError(t, err)
+	require.NoError(t, engine.ApproveRecoveryOperation(signers[1], proposalID))
+	require.NoError(t, engine.ApproveRecoveryOperation(signers[2], proposalID))
+
+	executedAt := uint64(1010)
+	_, err = engine.ExecuteRecoveryOperation(signers[3], proposalID, executedAt)
+	require.NoError(t, err)
+
+	// Audit record was written at execute time.
+	audit, err := store.GetAuditRecord(proposalID)
+	require.NoError(t, err)
+	require.NotNil(t, audit)
+	require.Equal(t, executedAt, audit.ExecutedAtBlock)
+	require.Equal(t, uint32(3), audit.ApprovalCount)
+	require.Equal(t, "executed", audit.Outcome)
+
+	// One block shy of retention window → NOT eligible.
+	err = engine.PruneProposal(proposalID, executedAt+drwaGovernancePruneRetentionBlocks-1)
+	require.ErrorIs(t, err, errDRWAGovernancePruneNotEligible)
+
+	// Exactly at retention window → eligible.
+	err = engine.PruneProposal(proposalID, executedAt+drwaGovernancePruneRetentionBlocks)
+	require.NoError(t, err)
+
+	// Proposal payload is gone; audit record survives.
+	stored, err := store.GetProposal(proposalID)
+	require.NoError(t, err)
+	require.Nil(t, stored, "proposal payload must be deleted after prune")
+
+	surviving, err := store.GetAuditRecord(proposalID)
+	require.NoError(t, err)
+	require.NotNil(t, surviving, "audit record must survive prune for forensic trail")
+	require.Equal(t, proposalID, surviving.ProposalID)
+	require.Equal(t, uint32(3), surviving.ApprovalCount)
+
+	// Metric fired exactly once.
+	metrics := snapshotDRWAMetrics()
+	require.Equal(
+		t,
+		uint64(1),
+		metrics[drwaMetricGovernanceProposalPruned],
+		"prune metric must fire exactly once",
+	)
+}
+
+// TestM14ExpiredProposalEligibleAfterRetention verifies the expired-
+// but-never-executed path: a proposal that reached its TTL expiry
+// still carries storage cost until the retention window elapses past
+// expiry, after which it can be pruned.
+func TestM14ExpiredProposalEligibleAfterRetention(t *testing.T) {
+	resetDRWAMetrics()
+	store := newMockGovernanceStore()
+	engine := NewDRWAGovernanceEngine(store)
+
+	tokenID := "TOKEN-m14-expired"
+	cfg := make3of5Config()
+	cfg.ProposalTTL = 100
+	require.NoError(t, store.SaveGovernanceConfig(tokenID, cfg))
+
+	envelope := makeTestRecoveryEnvelope(tokenID)
+	signers := cfg.Signers
+
+	proposalID, err := engine.ProposeRecoveryOperation(signers[0], envelope, 1000)
+	require.NoError(t, err)
+	// Do NOT reach quorum. Proposal will expire.
+
+	// TTL expires at block 1100. Retention window begins there.
+	// Before retention: not eligible.
+	err = engine.PruneProposal(proposalID, 1100+drwaGovernancePruneRetentionBlocks-1)
+	require.ErrorIs(t, err, errDRWAGovernancePruneNotEligible)
+
+	// At retention boundary: eligible.
+	err = engine.PruneProposal(proposalID, 1100+drwaGovernancePruneRetentionBlocks)
+	require.NoError(t, err)
+
+	stored, err := store.GetProposal(proposalID)
+	require.NoError(t, err)
+	require.Nil(t, stored)
+}
+
+// TestM14PendingProposalNotEligible verifies that a proposal that is
+// neither executed nor expired cannot be pruned — active governance
+// items must never be silently deleted.
+func TestM14PendingProposalNotEligible(t *testing.T) {
+	store := newMockGovernanceStore()
+	engine := NewDRWAGovernanceEngine(store)
+
+	tokenID := "TOKEN-m14-pending"
+	cfg := make3of5Config()
+	cfg.ProposalTTL = 100
+	require.NoError(t, store.SaveGovernanceConfig(tokenID, cfg))
+
+	envelope := makeTestRecoveryEnvelope(tokenID)
+	signers := cfg.Signers
+
+	proposalID, err := engine.ProposeRecoveryOperation(signers[0], envelope, 1000)
+	require.NoError(t, err)
+
+	// Still within TTL and not executed.
+	err = engine.PruneProposal(proposalID, 1050)
+	require.ErrorIs(t, err, errDRWAGovernancePruneNotEligible)
+}
+
+// TestM14PruneMissingProposal verifies that attempting to prune an
+// unknown proposal returns a clear `errDRWAGovernanceProposalNotFound`
+// rather than silently succeeding.
+func TestM14PruneMissingProposal(t *testing.T) {
+	store := newMockGovernanceStore()
+	engine := NewDRWAGovernanceEngine(store)
+
+	var fakeID [32]byte
+	fakeID[0] = 0xAA
+
+	err := engine.PruneProposal(fakeID, 1_000_000)
+	require.ErrorIs(t, err, errDRWAGovernanceProposalNotFound)
+}
+
+// TestM14PruneNilStore guards the defensive early-return in
+// PruneProposal — an engine constructed with a nil store must return
+// `errDRWAGovernanceNilStore` rather than nil-deref panic.
+func TestM14PruneNilStore(t *testing.T) {
+	engine := NewDRWAGovernanceEngine(nil)
+	var id [32]byte
+	err := engine.PruneProposal(id, 1_000_000)
+	require.ErrorIs(t, err, errDRWAGovernanceNilStore)
+}
+
 func TestHandleDRWAGovernanceOperationApproveAndExecute(t *testing.T) {
 	store := newMockGovernanceStore()
 	engine := NewDRWAGovernanceEngine(store)
@@ -780,4 +1455,44 @@ func TestHandleDRWAGovernanceOperationApproveAndExecute(t *testing.T) {
 
 	// Verify the token policy was actually applied.
 	require.Equal(t, uint64(1), adapter.tokenVersions[tokenID])
+}
+
+func TestHandleDRWAGovernanceOperationRejectsExpiredApprove(t *testing.T) {
+	store := newMockGovernanceStore()
+	engine := NewDRWAGovernanceEngine(store)
+	tokenID := "TOKEN-handle-expired-approve"
+	cfg := make3of5Config()
+	cfg.ProposalTTL = 100
+	require.NoError(t, store.SaveGovernanceConfig(tokenID, cfg))
+
+	adapter := &mockGovernanceCapableAdapter{
+		mockDRWASyncStateAdapter: newMockDRWASyncStateAdapter(),
+		engine:                   engine,
+		currentBlock:             1101,
+	}
+
+	envelope := makeTestRecoveryEnvelope(tokenID)
+	signers := cfg.Signers
+	proposalID, err := engine.ProposeRecoveryOperation(signers[0], envelope, 1000)
+	require.NoError(t, err)
+
+	approveEnvelope := &drwaSyncEnvelope{
+		CallerDomain: drwaSyncCallerRecoveryAdmin,
+		Operations: []drwaSyncOperation{
+			{
+				OperationType: drwaSyncOpGovernanceApprove,
+				TokenID:       tokenID,
+				Body:          proposalID[:],
+			},
+		},
+	}
+
+	result, err := handleDRWAGovernanceOperation(adapter, approveEnvelope, signers[1])
+	require.Nil(t, result)
+	require.ErrorIs(t, err, errDRWAGovernanceProposalExpired)
+
+	stored, err := store.GetProposal(proposalID)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.Len(t, stored.Approvals, 1)
 }

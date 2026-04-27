@@ -293,6 +293,73 @@ func TestBuildDRWARecoveryEnvelopeAddsCleanupDeleteOperations(t *testing.T) {
 	}
 }
 
+func TestApplyDRWARecoveryEnvelopeRollsBackAfterPartialProgress(t *testing.T) {
+	t.Parallel()
+
+	adapter := newMockDRWASyncStateAdapter()
+	adapter.tokenVersions["CARBON-1"] = 3
+	adapter.tokenBodies["CARBON-1"] = []byte(`{"regulated":false}`)
+	adapter.holderVersions["CARBON-1|erd1legacy"] = 2
+	adapter.holderBodies["CARBON-1|erd1legacy"] = []byte(`{"kyc":"approved"}`)
+	adapter.ensureHolderIndexed("CARBON-1", "erd1legacy")
+
+	manifest := &drwaRecoveryManifest{
+		TokenID:       "CARBON-1",
+		PolicyVersion: 4,
+		PolicyBody:    []byte(`{"regulated":true}`),
+		Holders: []drwaRecoveryHolder{
+			{Address: "erd1a", Version: 1, Body: []byte(`{"kyc":"approved"}`)},
+			{Address: "erd1b", Version: 1, Body: []byte(`{"kyc":"approved"}`)},
+		},
+	}
+
+	report, err := inspectDRWARecoveryState(adapter, manifest, nil)
+	if err != nil {
+		t.Fatalf("inspect recovery state: %v", err)
+	}
+
+	envelope, err := buildDRWARecoveryEnvelope(manifest, report)
+	if err != nil {
+		t.Fatalf("build recovery envelope: %v", err)
+	}
+	envelope.RecoveryScope = []string{manifest.TokenID}
+	envelope.PreRecoveryStateHash = nil
+
+	callCount := 0
+	adapter.putHolderHook = func(tokenID, holder string, version uint64, body []byte) error {
+		callCount++
+		if callCount == 2 {
+			return errDRWATestFailPut
+		}
+		key := tokenID + "|" + holder
+		adapter.holderVersions[key] = version
+		adapter.holderBodies[key] = body
+		adapter.ensureHolderIndexed(tokenID, holder)
+		return nil
+	}
+
+	_, err = applyDRWASyncEnvelope(adapter, envelope, drwaSyncMaxOperations, testDRWACallerAddress(drwaSyncCallerRecoveryAdmin))
+	if err == nil {
+		t.Fatalf("expected recovery apply failure")
+	}
+	if !adapter.rolledBack {
+		t.Fatalf("expected rollback after partial recovery progress")
+	}
+
+	if adapter.tokenVersions["CARBON-1"] != 3 || !bytes.Equal(adapter.tokenBodies["CARBON-1"], []byte(`{"regulated":false}`)) {
+		t.Fatalf("expected token policy restored after rollback")
+	}
+	if _, exists := adapter.holderVersions["CARBON-1|erd1a"]; exists {
+		t.Fatalf("expected newly repaired holder a to be absent after rollback")
+	}
+	if _, exists := adapter.holderVersions["CARBON-1|erd1b"]; exists {
+		t.Fatalf("expected newly repaired holder b to be absent after rollback")
+	}
+	if adapter.holderVersions["CARBON-1|erd1legacy"] != 2 || !bytes.Equal(adapter.holderBodies["CARBON-1|erd1legacy"], []byte(`{"kyc":"approved"}`)) {
+		t.Fatalf("expected legacy holder mirror restored after rollback")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // computeRecoveryManifestHash tests (0% → covered)
 // ---------------------------------------------------------------------------

@@ -1,8 +1,14 @@
 package hooks
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
+
+	"github.com/multiversx/mx-chain-core-go/core"
+	"github.com/multiversx/mx-chain-go/testscommon/state"
+	vmcommon "github.com/multiversx/mx-chain-vm-common-go"
+	vmmock "github.com/multiversx/mx-chain-vm-common-go/mock"
 )
 
 func TestValidateDRWARolloutManifestRejectsInvalidStage(t *testing.T) {
@@ -29,10 +35,27 @@ func TestValidateDRWARolloutManifestAcceptsZeroThresholds(t *testing.T) {
 		Stage:                  drwaRolloutStageCanary,
 		MaxSyncFailureRateBps:  0,
 		MaxAPIErrorRateBps:     0,
-		MaxDenialMismatchCount: 0,
+		MaxDenialMismatchRateBps: 0,
 	})
 	if err != nil {
 		t.Fatalf("zero thresholds should be valid (zero-tolerance), got %v", err)
+	}
+}
+
+func TestValidateDRWARolloutManifestRejectsLegacyDenialMismatchCountField(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"token_id":"CARBON-1",
+		"issuer":"issuer-1",
+		"stage":"canary",
+		"max_denial_mismatch_count":1
+	}`)
+
+	var manifest drwaRolloutManifest
+	err := json.Unmarshal(payload, &manifest)
+	if err != errDRWALegacyDenialMismatchCountThreshold {
+		t.Fatalf("expected legacy denial threshold rejection, got %v", err)
 	}
 }
 
@@ -45,7 +68,7 @@ func TestValidateDRWARolloutManifestRejectsThresholdsAboveUpperBounds(t *testing
 		Stage:                  drwaRolloutStageCanary,
 		MaxSyncFailureRateBps:  drwaRolloutMaxFailureRateBpsUpperBound + 1,
 		MaxAPIErrorRateBps:     10,
-		MaxDenialMismatchCount: 1,
+		MaxDenialMismatchRateBps: 1,
 	})
 	if err != errDRWAInvalidRolloutThresholds {
 		t.Fatalf("expected upper-bound rejection, got %v", err)
@@ -63,7 +86,7 @@ func TestInspectDRWARolloutPreflightRequiresPolicy(t *testing.T) {
 		ExpectedPolicyVersion:  2,
 		MaxSyncFailureRateBps:  10,
 		MaxAPIErrorRateBps:     10,
-		MaxDenialMismatchCount: 1,
+		MaxDenialMismatchRateBps: 1,
 	}, nil)
 	if err != errDRWARolloutPolicyMissing {
 		t.Fatalf("expected policy missing, got %v", err)
@@ -87,7 +110,7 @@ func TestInspectDRWARolloutPreflightFlagsMissingHolders(t *testing.T) {
 		RequiredHolders:        []string{"erd1a", "erd1b"},
 		MaxSyncFailureRateBps:  10,
 		MaxAPIErrorRateBps:     10,
-		MaxDenialMismatchCount: 1,
+		MaxDenialMismatchRateBps: 1,
 	}, nil)
 	if err != nil {
 		t.Fatalf("inspect rollout: %v", err)
@@ -114,7 +137,7 @@ func TestInspectDRWARolloutPreflightBlocksLimitedWhenCanaryRequired(t *testing.T
 		ExpectedPolicyVersion:  2,
 		MaxSyncFailureRateBps:  10,
 		MaxAPIErrorRateBps:     10,
-		MaxDenialMismatchCount: 1,
+		MaxDenialMismatchRateBps: 1,
 	}, nil)
 	if err != errDRWARolloutNotCanaryReady {
 		t.Fatalf("expected canary-ready rejection, got %v", err)
@@ -158,11 +181,12 @@ func TestBuildDRWARolloutVerificationReportAcceptsHealthyMetrics(t *testing.T) {
 		Stage:                  drwaRolloutStageCanary,
 		MaxSyncFailureRateBps:  10,
 		MaxAPIErrorRateBps:     20,
-		MaxDenialMismatchCount: 1,
+		MaxDenialMismatchRateBps: 100,
 	}, &drwaRolloutObservedMetrics{
 		SyncFailureRateBps:  5,
 		APIErrorRateBps:     10,
 		DenialMismatchCount: 0,
+		DenialComparisonsTotal: 100,
 	})
 	if err != nil {
 		t.Fatalf("build verification report: %v", err)
@@ -181,11 +205,12 @@ func TestBuildDRWARolloutVerificationReportRejectsBadMetrics(t *testing.T) {
 		Stage:                  drwaRolloutStageLimited,
 		MaxSyncFailureRateBps:  10,
 		MaxAPIErrorRateBps:     20,
-		MaxDenialMismatchCount: 1,
+		MaxDenialMismatchRateBps: 100,
 	}, &drwaRolloutObservedMetrics{
 		SyncFailureRateBps:  50,
 		APIErrorRateBps:     21,
 		DenialMismatchCount: 2,
+		DenialComparisonsTotal: 100,
 	})
 	if err != nil {
 		t.Fatalf("build verification report: %v", err)
@@ -195,6 +220,70 @@ func TestBuildDRWARolloutVerificationReportRejectsBadMetrics(t *testing.T) {
 	}
 	if len(report.FailedChecks) != 3 {
 		t.Fatalf("expected 3 failed checks, got %+v", report.FailedChecks)
+	}
+}
+
+func TestBuildDRWARolloutVerificationReportSupportsDenialMismatchRateThreshold(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"token_id":"CARBON-1",
+		"issuer":"issuer-1",
+		"stage":"limited",
+		"max_sync_failure_rate_bps":10,
+		"max_api_error_rate_bps":20,
+		"max_denial_mismatch_rate_bps":100
+	}`)
+
+	var manifest drwaRolloutManifest
+	err := json.Unmarshal(payload, &manifest)
+	if err != nil {
+		t.Fatalf("unmarshal manifest: %v", err)
+	}
+
+	report, err := buildDRWARolloutVerificationReport(&manifest, &drwaRolloutObservedMetrics{
+		SyncFailureRateBps:    5,
+		APIErrorRateBps:       10,
+		DenialMismatchCount:   1,
+		DenialComparisonsTotal: 100,
+	})
+	if err != nil {
+		t.Fatalf("build verification report: %v", err)
+	}
+	if !report.Accepted {
+		t.Fatalf("expected verification acceptance, got %+v", report)
+	}
+}
+
+func TestBuildDRWARolloutVerificationReportRejectsWhenDenialMismatchRateExceedsThreshold(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"token_id":"CARBON-1",
+		"issuer":"issuer-1",
+		"stage":"limited",
+		"max_sync_failure_rate_bps":10,
+		"max_api_error_rate_bps":20,
+		"max_denial_mismatch_rate_bps":50
+	}`)
+
+	var manifest drwaRolloutManifest
+	err := json.Unmarshal(payload, &manifest)
+	if err != nil {
+		t.Fatalf("unmarshal manifest: %v", err)
+	}
+
+	report, err := buildDRWARolloutVerificationReport(&manifest, &drwaRolloutObservedMetrics{
+		SyncFailureRateBps:    5,
+		APIErrorRateBps:       10,
+		DenialMismatchCount:   3,
+		DenialComparisonsTotal: 100,
+	})
+	if err != nil {
+		t.Fatalf("build verification report: %v", err)
+	}
+	if report.Accepted {
+		t.Fatalf("expected verification rejection, got %+v", report)
 	}
 }
 
@@ -247,7 +336,7 @@ func TestValidateDRWARolloutAdmissionRequiresVerificationBeyondCanary(t *testing
 		Stage:                  drwaRolloutStageLimited,
 		MaxSyncFailureRateBps:  10,
 		MaxAPIErrorRateBps:     10,
-		MaxDenialMismatchCount: 1,
+		MaxDenialMismatchRateBps: 1,
 	}, &drwaRolloutPreflightReport{
 		TokenID: "CARBON-1",
 		Stage:   drwaRolloutStageLimited,
@@ -267,7 +356,7 @@ func TestValidateDRWARolloutAdmissionRejectsFailedVerification(t *testing.T) {
 		Stage:                  drwaRolloutStageProduction,
 		MaxSyncFailureRateBps:  10,
 		MaxAPIErrorRateBps:     10,
-		MaxDenialMismatchCount: 1,
+		MaxDenialMismatchRateBps: 1,
 	}, &drwaRolloutPreflightReport{
 		TokenID: "CARBON-1",
 		Stage:   drwaRolloutStageProduction,
@@ -291,7 +380,7 @@ func TestValidateDRWARolloutAdmissionRejectsPreflightTokenMismatch(t *testing.T)
 		Stage:                  drwaRolloutStageCanary,
 		MaxSyncFailureRateBps:  10,
 		MaxAPIErrorRateBps:     10,
-		MaxDenialMismatchCount: 1,
+		MaxDenialMismatchRateBps: 1,
 	}, &drwaRolloutPreflightReport{
 		TokenID: "OTHER-1",
 		Stage:   drwaRolloutStageCanary,
@@ -311,7 +400,7 @@ func TestValidateDRWARolloutAdmissionRejectsVerificationStageMismatch(t *testing
 		Stage:                  drwaRolloutStageProduction,
 		MaxSyncFailureRateBps:  10,
 		MaxAPIErrorRateBps:     10,
-		MaxDenialMismatchCount: 1,
+		MaxDenialMismatchRateBps: 1,
 	}, &drwaRolloutPreflightReport{
 		TokenID: "CARBON-1",
 		Stage:   drwaRolloutStageProduction,
@@ -335,7 +424,7 @@ func TestValidateDRWARolloutAdmissionAllowsCanaryWithoutVerification(t *testing.
 		Stage:                  drwaRolloutStageCanary,
 		MaxSyncFailureRateBps:  10,
 		MaxAPIErrorRateBps:     10,
-		MaxDenialMismatchCount: 1,
+		MaxDenialMismatchRateBps: 1,
 	}, &drwaRolloutPreflightReport{
 		TokenID: "CARBON-1",
 		Stage:   drwaRolloutStageCanary,
@@ -360,7 +449,7 @@ func TestValidateDRWARolloutManifestUsesDefaultThresholdsWhenNoneProvided(t *tes
 		Stage:                  drwaRolloutStageCanary,
 		MaxSyncFailureRateBps:  100,
 		MaxAPIErrorRateBps:     100,
-		MaxDenialMismatchCount: 10,
+		MaxDenialMismatchRateBps: 100,
 	})
 	if err != nil {
 		t.Fatalf("expected valid with default thresholds, got %v", err)
@@ -373,7 +462,7 @@ func TestValidateDRWARolloutManifestRespectsCustomGovernanceThresholds(t *testin
 	custom := drwaRolloutThresholdConfig{
 		MaxFailureRateBpsUpperBound:  500,
 		MaxAPIErrorRateBpsUpperBound: 300,
-		MaxDenialMismatchUpperBound:  50,
+		MaxDenialMismatchRateBpsUpperBound: 500,
 	}
 
 	// Value within custom bounds but above defaults — should pass with custom config
@@ -383,7 +472,7 @@ func TestValidateDRWARolloutManifestRespectsCustomGovernanceThresholds(t *testin
 		Stage:                  drwaRolloutStageCanary,
 		MaxSyncFailureRateBps:  200,
 		MaxAPIErrorRateBps:     250,
-		MaxDenialMismatchCount: 40,
+		MaxDenialMismatchRateBps: 40,
 	}, custom)
 	if err != nil {
 		t.Fatalf("expected valid with custom thresholds, got %v", err)
@@ -396,7 +485,7 @@ func TestValidateDRWARolloutManifestRejectsAboveCustomGovernanceThresholds(t *te
 	custom := drwaRolloutThresholdConfig{
 		MaxFailureRateBpsUpperBound:  500,
 		MaxAPIErrorRateBpsUpperBound: 300,
-		MaxDenialMismatchUpperBound:  50,
+		MaxDenialMismatchRateBpsUpperBound: 500,
 	}
 
 	err := validateDRWARolloutManifest(&drwaRolloutManifest{
@@ -405,7 +494,7 @@ func TestValidateDRWARolloutManifestRejectsAboveCustomGovernanceThresholds(t *te
 		Stage:                  drwaRolloutStageCanary,
 		MaxSyncFailureRateBps:  501,
 		MaxAPIErrorRateBps:     10,
-		MaxDenialMismatchCount: 1,
+		MaxDenialMismatchRateBps: 1,
 	}, custom)
 	if err != errDRWAInvalidRolloutThresholds {
 		t.Fatalf("expected threshold rejection, got %v", err)
@@ -443,7 +532,7 @@ func TestLoadRolloutThresholdConfigLoadsFromGovernance(t *testing.T) {
 			"CARBON-1": {
 				MaxFailureRateBpsUpperBound:  500,
 				MaxAPIErrorRateBpsUpperBound: 400,
-				MaxDenialMismatchUpperBound:  25,
+				MaxDenialMismatchRateBpsUpperBound: 250,
 			},
 		},
 	}
@@ -455,8 +544,8 @@ func TestLoadRolloutThresholdConfigLoadsFromGovernance(t *testing.T) {
 	if cfg.MaxAPIErrorRateBpsUpperBound != 400 {
 		t.Fatalf("expected 400, got %d", cfg.MaxAPIErrorRateBpsUpperBound)
 	}
-	if cfg.MaxDenialMismatchUpperBound != 25 {
-		t.Fatalf("expected 25, got %d", cfg.MaxDenialMismatchUpperBound)
+	if cfg.MaxDenialMismatchRateBpsUpperBound != 250 {
+		t.Fatalf("expected 250, got %d", cfg.MaxDenialMismatchRateBpsUpperBound)
 	}
 }
 
@@ -474,6 +563,54 @@ func TestLoadRolloutThresholdConfigFallsBackForUnknownToken(t *testing.T) {
 	}
 }
 
+func TestLoadRolloutThresholdConfigLoadsFromGovernanceTrieStore(t *testing.T) {
+	t.Parallel()
+
+	systemAccount := vmmock.NewAccountWrapMock(core.SystemAccountAddress)
+	accountsStub := &state.AccountsStub{
+		LoadAccountCalled: func(address []byte) (vmcommon.AccountHandler, error) {
+			if string(address) == string(core.SystemAccountAddress) {
+				return systemAccount, nil
+			}
+			return vmmock.NewAccountWrapMock(address), nil
+		},
+		SaveAccountCalled:      func(account vmcommon.AccountHandler) error { return nil },
+		JournalLenCalled:       func() int { return 1 },
+		RevertToSnapshotCalled: func(snapshot int) error { return nil },
+	}
+
+	store, err := newDRWAGovernanceTrieStore(accountsStub)
+	if err != nil {
+		t.Fatalf("newDRWAGovernanceTrieStore: %v", err)
+	}
+
+	cfg := &DRWAGovernanceConfig{
+		Threshold:   2,
+		Signers:     [][]byte{[]byte("signer-1"), []byte("signer-2")},
+		ProposalTTL: 2400,
+		MaxSigners:  10,
+		RolloutThresholds: &drwaRolloutThresholdConfig{
+			MaxFailureRateBpsUpperBound:        400,
+			MaxAPIErrorRateBpsUpperBound:       300,
+			MaxDenialMismatchRateBpsUpperBound: 250,
+		},
+	}
+	if err = store.SaveGovernanceConfig("CARBON-1", cfg); err != nil {
+		t.Fatalf("SaveGovernanceConfig: %v", err)
+	}
+
+	loaded := loadRolloutThresholdConfig(store, "CARBON-1")
+	if loaded.MaxFailureRateBpsUpperBound != 400 {
+		t.Fatalf("expected 400, got %d", loaded.MaxFailureRateBpsUpperBound)
+	}
+	if loaded.MaxAPIErrorRateBpsUpperBound != 300 {
+		t.Fatalf("expected 300, got %d", loaded.MaxAPIErrorRateBpsUpperBound)
+	}
+	if loaded.MaxDenialMismatchRateBpsUpperBound != 250 {
+		t.Fatalf("expected 250, got %d", loaded.MaxDenialMismatchRateBpsUpperBound)
+	}
+}
+
 func TestInspectDRWARolloutPreflightWithGovernanceUsesCustomConfig(t *testing.T) {
 	t.Parallel()
 
@@ -486,7 +623,7 @@ func TestInspectDRWARolloutPreflightWithGovernanceUsesCustomConfig(t *testing.T)
 			"CARBON-1": {
 				MaxFailureRateBpsUpperBound:  500,
 				MaxAPIErrorRateBpsUpperBound: 500,
-				MaxDenialMismatchUpperBound:  100,
+				MaxDenialMismatchRateBpsUpperBound: 500,
 			},
 		},
 	}
@@ -499,7 +636,7 @@ func TestInspectDRWARolloutPreflightWithGovernanceUsesCustomConfig(t *testing.T)
 		ExpectedPolicyVersion:  1,
 		MaxSyncFailureRateBps:  200,
 		MaxAPIErrorRateBps:     200,
-		MaxDenialMismatchCount: 50,
+		MaxDenialMismatchRateBps: 50,
 	}, nil)
 	if err != nil {
 		t.Fatalf("expected success with governance config, got %v", err)
@@ -517,7 +654,7 @@ func TestBuildDRWARolloutVerificationReportWithGovernanceUsesCustomConfig(t *tes
 			"CARBON-1": {
 				MaxFailureRateBpsUpperBound:  500,
 				MaxAPIErrorRateBpsUpperBound: 500,
-				MaxDenialMismatchUpperBound:  100,
+				MaxDenialMismatchRateBpsUpperBound: 500,
 			},
 		},
 	}
@@ -528,11 +665,12 @@ func TestBuildDRWARolloutVerificationReportWithGovernanceUsesCustomConfig(t *tes
 		Stage:                  drwaRolloutStageCanary,
 		MaxSyncFailureRateBps:  200,
 		MaxAPIErrorRateBps:     200,
-		MaxDenialMismatchCount: 50,
+		MaxDenialMismatchRateBps: 500,
 	}, &drwaRolloutObservedMetrics{
 		SyncFailureRateBps:  150,
 		APIErrorRateBps:     100,
 		DenialMismatchCount: 30,
+		DenialComparisonsTotal: 1000,
 	})
 	if err != nil {
 		t.Fatalf("expected success, got %v", err)
@@ -585,7 +723,7 @@ func TestValidateDRWARolloutAdmissionWithState_ValidCanaryAdmission(t *testing.T
 		Stage:                  drwaRolloutStageCanary,
 		MaxSyncFailureRateBps:  10,
 		MaxAPIErrorRateBps:     10,
-		MaxDenialMismatchCount: 1,
+		MaxDenialMismatchRateBps: 1,
 	}, &drwaRolloutPreflightReport{
 		TokenID: "CARBON-1",
 		Stage:   drwaRolloutStageCanary,
@@ -608,7 +746,7 @@ func TestValidateDRWARolloutAdmissionWithState_RejectsNilStageStore(t *testing.T
 		Stage:                  drwaRolloutStageCanary,
 		MaxSyncFailureRateBps:  10,
 		MaxAPIErrorRateBps:     10,
-		MaxDenialMismatchCount: 1,
+		MaxDenialMismatchRateBps: 1,
 	}, &drwaRolloutPreflightReport{
 		TokenID: "CARBON-1",
 		Stage:   drwaRolloutStageCanary,
@@ -631,7 +769,7 @@ func TestValidateDRWARolloutAdmissionWithState_RejectsNonMonotonic(t *testing.T)
 		Stage:                  drwaRolloutStageCanary,
 		MaxSyncFailureRateBps:  10,
 		MaxAPIErrorRateBps:     10,
-		MaxDenialMismatchCount: 1,
+		MaxDenialMismatchRateBps: 1,
 	}, &drwaRolloutPreflightReport{
 		TokenID: "CARBON-1",
 		Stage:   drwaRolloutStageCanary,
@@ -654,7 +792,7 @@ func TestValidateDRWARolloutAdmissionWithState_RejectsStageStoreReadError(t *tes
 		Stage:                  drwaRolloutStageCanary,
 		MaxSyncFailureRateBps:  10,
 		MaxAPIErrorRateBps:     10,
-		MaxDenialMismatchCount: 1,
+		MaxDenialMismatchRateBps: 1,
 	}, &drwaRolloutPreflightReport{
 		TokenID: "CARBON-1",
 		Stage:   drwaRolloutStageCanary,
@@ -677,7 +815,7 @@ func TestValidateDRWARolloutAdmissionWithState_MonotonicProgression(t *testing.T
 		Stage:                  drwaRolloutStageLimited,
 		MaxSyncFailureRateBps:  10,
 		MaxAPIErrorRateBps:     10,
-		MaxDenialMismatchCount: 1,
+		MaxDenialMismatchRateBps: 1,
 	}, &drwaRolloutPreflightReport{
 		TokenID: "CARBON-1",
 		Stage:   drwaRolloutStageLimited,
@@ -705,7 +843,7 @@ func TestValidateDRWARolloutAdmissionRejectsNonMonotonicStage(t *testing.T) {
 		Stage:                  drwaRolloutStageCanary,
 		MaxSyncFailureRateBps:  10,
 		MaxAPIErrorRateBps:     10,
-		MaxDenialMismatchCount: 1,
+		MaxDenialMismatchRateBps: 1,
 	}, &drwaRolloutPreflightReport{
 		TokenID: "CARBON-1",
 		Stage:   drwaRolloutStageCanary,
@@ -722,7 +860,7 @@ func TestValidateDRWARolloutAdmissionRejectsNonMonotonicStage(t *testing.T) {
 		Stage:                  drwaRolloutStageLimited,
 		MaxSyncFailureRateBps:  10,
 		MaxAPIErrorRateBps:     10,
-		MaxDenialMismatchCount: 1,
+		MaxDenialMismatchRateBps: 1,
 	}, &drwaRolloutPreflightReport{
 		TokenID: "CARBON-1",
 		Stage:   drwaRolloutStageLimited,

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"strings"
 	"sync"
 
 	"github.com/multiversx/mx-chain-core-go/core/check"
@@ -50,6 +51,8 @@ const unreachableEpoch = ^uint32(0)
 
 var log = logger.GetOrCreate("genesis/process")
 var zero = big.NewInt(0)
+
+const drwaKeyManagementModelMultisig3of5Contract = "multisig_3of5_contract"
 
 type deployedScMetrics struct {
 	numDelegation int
@@ -118,6 +121,12 @@ func CreateShardGenesisBlock(
 	numSetBalances, err := setBalancesToTrie(arg)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("%w encountered when creating genesis block for shard %d while setting the balances to trie",
+			err, arg.ShardCoordinator.SelfId())
+	}
+
+	err = setupDRWAAuthorizedCallers(arg)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("%w encountered when creating genesis block for shard %d while provisioning DRWA authorized callers",
 			err, arg.ShardCoordinator.SelfId())
 	}
 
@@ -346,6 +355,53 @@ func setBalanceToTrie(arg ArgsGenesisBlockCreator, accnt genesis.InitialAccountH
 	}
 
 	return arg.Accounts.SaveAccount(account)
+}
+
+func setupDRWAAuthorizedCallers(arg ArgsGenesisBlockCreator) error {
+	if !arg.DRWAConfig.Enabled {
+		log.Info("DRWA disabled")
+		return nil
+	}
+
+	if arg.DRWAConfig.KeyManagementModel != drwaKeyManagementModelMultisig3of5Contract {
+		return fmt.Errorf("invalid DRWA key management model %q: expected %q",
+			arg.DRWAConfig.KeyManagementModel, drwaKeyManagementModelMultisig3of5Contract)
+	}
+
+	callers := []struct {
+		domain  string
+		address string
+	}{
+		{domain: "auth_admin", address: arg.DRWAConfig.AuthorizedCallers.AuthAdmin},
+		{domain: "policy_registry", address: arg.DRWAConfig.AuthorizedCallers.PolicyRegistry},
+		{domain: "asset_manager", address: arg.DRWAConfig.AuthorizedCallers.AssetManager},
+		{domain: "identity_registry", address: arg.DRWAConfig.AuthorizedCallers.IdentityRegistry},
+		{domain: "attestation", address: arg.DRWAConfig.AuthorizedCallers.Attestation},
+		{domain: "recovery_admin", address: arg.DRWAConfig.AuthorizedCallers.RecoveryAdmin},
+	}
+
+	loadedDomains := make([]string, 0, len(callers))
+	for _, caller := range callers {
+		if strings.TrimSpace(caller.address) == "" {
+			return fmt.Errorf("missing DRWA authorized caller for domain %s", caller.domain)
+		}
+		loadedDomains = append(loadedDomains, caller.domain)
+	}
+
+	log.Info("DRWA config loaded", "domains", loadedDomains)
+
+	for _, caller := range callers {
+		address, err := hooks.NormalizeDRWAAuthorizedCallerAddress(caller.address)
+		if err != nil {
+			return fmt.Errorf("invalid DRWA authorized caller for domain %s: %w", caller.domain, err)
+		}
+		if err = hooks.ProvisionDRWAAuthorizedCaller(arg.Accounts, caller.domain, address, 1); err != nil {
+			return fmt.Errorf("cannot provision DRWA authorized caller for domain %s: %w", caller.domain, err)
+		}
+	}
+
+	log.Info("DRWA genesis provisioning complete", "domains", loadedDomains)
+	return nil
 }
 
 func createProcessorsForShardGenesisBlock(arg ArgsGenesisBlockCreator, enableEpochsConfig config.EnableEpochs, roundConfig config.RoundConfig) (*genesisProcessors, error) {

@@ -51,8 +51,9 @@ func NewTransactionsFeeProcessor(arg ArgTransactionsFeeProcessor) (*transactions
 	}
 
 	parser, err := datafield.NewOperationDataFieldParser(&datafield.ArgsOperationDataFieldParser{
-		AddressLength: arg.PubKeyConverter.Len(),
-		Marshalizer:   arg.Marshaller,
+		AddressLength:                       arg.PubKeyConverter.Len(),
+		Marshalizer:                         arg.Marshaller,
+		RelayedTransactionsV1V2DisableEpoch: arg.EnableEpochsHandler.GetActivationEpoch(common.RelayedTransactionsV1V2DisableFlag),
 	})
 	if err != nil {
 		return nil, err

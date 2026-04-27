@@ -145,6 +145,64 @@ func TestBuildDRWARollbackEnvelopeRejectsDeleteVersionOverflow(t *testing.T) {
 	}
 }
 
+func TestApplyDRWAMigrationEnvelopeRollsBackAfterPartialProgress(t *testing.T) {
+	t.Parallel()
+
+	adapter := newMockDRWASyncStateAdapter()
+	adapter.tokenVersions["CARBON-1"] = 5
+	adapter.tokenBodies["CARBON-1"] = []byte(`{"drwa_enabled":false}`)
+	adapter.holderVersions["CARBON-1|erd1a"] = 4
+	adapter.holderBodies["CARBON-1|erd1a"] = []byte(`{"kyc":"approved"}`)
+	adapter.ensureHolderIndexed("CARBON-1", "erd1a")
+
+	manifest := &drwaMigrationManifest{
+		TokenID:       "CARBON-1",
+		PolicyVersion: 6,
+		PolicyBody:    []byte(`{"drwa_enabled":true}`),
+		Holders: []drwaMigrationHolder{
+			{Address: "erd1a", Version: 5, Body: []byte(`{"kyc":"revalidated"}`)},
+			{Address: "erd1b", Version: 1, Body: []byte(`{"kyc":"approved"}`)},
+		},
+	}
+
+	envelope, err := buildDRWAMigrationEnvelope(manifest)
+	if err != nil {
+		t.Fatalf("build migration envelope: %v", err)
+	}
+	envelope.RecoveryScope = []string{manifest.TokenID}
+
+	callCount := 0
+	adapter.putHolderHook = func(tokenID, holder string, version uint64, body []byte) error {
+		callCount++
+		if callCount == 2 {
+			return errDRWATestFailPut
+		}
+		key := tokenID + "|" + holder
+		adapter.holderVersions[key] = version
+		adapter.holderBodies[key] = body
+		adapter.ensureHolderIndexed(tokenID, holder)
+		return nil
+	}
+
+	_, err = applyDRWASyncEnvelope(adapter, envelope, drwaSyncMaxOperations, testDRWACallerAddress(drwaSyncCallerRecoveryAdmin))
+	if err == nil {
+		t.Fatalf("expected migration apply failure")
+	}
+	if !adapter.rolledBack {
+		t.Fatalf("expected rollback after partial migration progress")
+	}
+
+	if adapter.tokenVersions["CARBON-1"] != 5 || !bytes.Equal(adapter.tokenBodies["CARBON-1"], []byte(`{"drwa_enabled":false}`)) {
+		t.Fatalf("expected token policy restored after rollback")
+	}
+	if adapter.holderVersions["CARBON-1|erd1a"] != 4 || !bytes.Equal(adapter.holderBodies["CARBON-1|erd1a"], []byte(`{"kyc":"approved"}`)) {
+		t.Fatalf("expected original holder mirror restored after rollback")
+	}
+	if _, exists := adapter.holderVersions["CARBON-1|erd1b"]; exists {
+		t.Fatalf("expected new holder mirror to be absent after rollback")
+	}
+}
+
 func TestPersistDRWAMigrationAuthorizedCallers(t *testing.T) {
 	t.Parallel()
 

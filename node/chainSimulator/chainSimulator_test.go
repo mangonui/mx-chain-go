@@ -1,6 +1,7 @@
 package chainSimulator
 
 import (
+	"encoding/hex"
 	"math/big"
 	"strings"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"github.com/multiversx/mx-chain-go/node/chainSimulator/components/api"
 	"github.com/multiversx/mx-chain-go/node/chainSimulator/configs"
 	"github.com/multiversx/mx-chain-go/node/chainSimulator/dtos"
+	"github.com/multiversx/mx-chain-go/state"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -237,6 +239,395 @@ func TestChainSimulator_SetState(t *testing.T) {
 	defer chainSimulator.Close()
 
 	chainSimulatorCommon.CheckSetState(t, chainSimulator, chainSimulator.GetNodeHandler(0))
+}
+
+func TestChainSimulator_SetStateMultiple_SystemAccountReplicatesAcrossShards(t *testing.T) {
+	if testing.Short() {
+		t.Skip("this is not a short test")
+	}
+
+	startTime := time.Now().Unix()
+	roundDurationInMillis := uint64(6000)
+	roundsPerEpoch := core.OptionalUint64{
+		HasValue: true,
+		Value:    20,
+	}
+	chainSimulator, err := NewChainSimulator(ArgsChainSimulator{
+		BypassTxSignatureCheck: true,
+		TempDir:                t.TempDir(),
+		PathToInitialConfig:    defaultPathToInitialConfig,
+		NumOfShards:            3,
+		GenesisTimestamp:       startTime,
+		RoundDurationInMillis:  roundDurationInMillis,
+		RoundsPerEpoch:         roundsPerEpoch,
+		ApiInterface:           api.NewNoApiInterface(),
+		MinNodesPerShard:       1,
+		MetaChainMinNodes:      1,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, chainSimulator)
+	defer chainSimulator.Close()
+
+	const systemAccount = "erd1lllllllllllllllllllllllllllllllllllllllllllllllllllsckry7t"
+	const authKey = "drwa:auth:identity_registry"
+	const authValue = "0000000000000000050020ff05831a43c822781252791020a395abdbcc54ed60"
+
+	addressConverter := chainSimulator.GetNodeHandler(core.MetachainShardId).GetCoreComponents().AddressPubKeyConverter()
+	systemAccountBytes, err := addressConverter.Decode(systemAccount)
+	require.NoError(t, err)
+	require.Equal(t, core.SystemAccountAddress, systemAccountBytes)
+
+	err = chainSimulator.SetStateMultiple([]*dtos.AddressState{
+		{
+			Address: systemAccount,
+			Pairs: map[string]string{
+				hex.EncodeToString([]byte(authKey)): authValue,
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	expectedValue, err := hex.DecodeString(authValue)
+	require.NoError(t, err)
+
+	for _, shardID := range []uint32{0, 1, 2, core.MetachainShardId} {
+		nodeHandler := chainSimulator.GetNodeHandler(shardID)
+		account, loadErr := nodeHandler.GetStateComponents().AccountsAdapter().LoadAccount(core.SystemAccountAddress)
+		require.NoError(t, loadErr, "shard %d should load system account", shardID)
+		userAccount, ok := account.(state.UserAccountHandler)
+		require.True(t, ok, "shard %d system account should be a user account", shardID)
+		require.NotEmpty(t, userAccount.GetRootHash(), "shard %d system account should have a data trie root hash after SetStateMultiple", shardID)
+
+		value, _, retrieveErr := userAccount.RetrieveValue([]byte(authKey))
+		require.NoError(t, retrieveErr, "shard %d should retrieve DRWA authorized caller key", shardID)
+		require.Equal(t, expectedValue, value, "shard %d should have replicated DRWA authorized caller value", shardID)
+	}
+}
+
+func TestChainSimulator_SetKeyValueForAddress_SystemAccountReplicatesAcrossShards(t *testing.T) {
+	if testing.Short() {
+		t.Skip("this is not a short test")
+	}
+
+	startTime := time.Now().Unix()
+	roundDurationInMillis := uint64(6000)
+	roundsPerEpoch := core.OptionalUint64{
+		HasValue: true,
+		Value:    20,
+	}
+	chainSimulator, err := NewChainSimulator(ArgsChainSimulator{
+		BypassTxSignatureCheck: true,
+		TempDir:                t.TempDir(),
+		PathToInitialConfig:    defaultPathToInitialConfig,
+		NumOfShards:            3,
+		GenesisTimestamp:       startTime,
+		RoundDurationInMillis:  roundDurationInMillis,
+		RoundsPerEpoch:         roundsPerEpoch,
+		ApiInterface:           api.NewNoApiInterface(),
+		MinNodesPerShard:       1,
+		MetaChainMinNodes:      1,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, chainSimulator)
+	defer chainSimulator.Close()
+
+	const systemAccount = "erd1lllllllllllllllllllllllllllllllllllllllllllllllllllsckry7t"
+	const authKey = "drwa:auth:identity_registry"
+	const authValue = "0000000000000000050020ff05831a43c822781252791020a395abdbcc54ed60"
+
+	addressConverter := chainSimulator.GetNodeHandler(core.MetachainShardId).GetCoreComponents().AddressPubKeyConverter()
+	systemAccountBytes, err := addressConverter.Decode(systemAccount)
+	require.NoError(t, err)
+	require.Equal(t, core.SystemAccountAddress, systemAccountBytes)
+
+	err = chainSimulator.SetKeyValueForAddress(systemAccount, map[string]string{
+		hex.EncodeToString([]byte(authKey)): authValue,
+	})
+	require.NoError(t, err)
+
+	expectedValue, err := hex.DecodeString(authValue)
+	require.NoError(t, err)
+
+	for _, shardID := range []uint32{0, 1, 2, core.MetachainShardId} {
+		nodeHandler := chainSimulator.GetNodeHandler(shardID)
+		account, loadErr := nodeHandler.GetStateComponents().AccountsAdapter().LoadAccount(core.SystemAccountAddress)
+		require.NoError(t, loadErr, "shard %d should load system account", shardID)
+		userAccount, ok := account.(state.UserAccountHandler)
+		require.True(t, ok, "shard %d system account should be a user account", shardID)
+		require.NotEmpty(t, userAccount.GetRootHash(), "shard %d system account should have a data trie root hash after SetKeyValueForAddress", shardID)
+
+		value, _, retrieveErr := userAccount.RetrieveValue([]byte(authKey))
+		require.NoError(t, retrieveErr, "shard %d should retrieve DRWA authorized caller key", shardID)
+		require.Equal(t, expectedValue, value, "shard %d should have replicated DRWA authorized caller value", shardID)
+	}
+}
+
+func TestChainSimulator_setKeyValueSystemAccount_ReplicatesAcrossShards(t *testing.T) {
+	if testing.Short() {
+		t.Skip("this is not a short test")
+	}
+
+	startTime := time.Now().Unix()
+	roundDurationInMillis := uint64(6000)
+	roundsPerEpoch := core.OptionalUint64{
+		HasValue: true,
+		Value:    20,
+	}
+	chainSimulator, err := NewChainSimulator(ArgsChainSimulator{
+		BypassTxSignatureCheck: true,
+		TempDir:                t.TempDir(),
+		PathToInitialConfig:    defaultPathToInitialConfig,
+		NumOfShards:            3,
+		GenesisTimestamp:       startTime,
+		RoundDurationInMillis:  roundDurationInMillis,
+		RoundsPerEpoch:         roundsPerEpoch,
+		ApiInterface:           api.NewNoApiInterface(),
+		MinNodesPerShard:       1,
+		MetaChainMinNodes:      1,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, chainSimulator)
+	defer chainSimulator.Close()
+
+	const authKey = "drwa:auth:identity_registry"
+	const authValue = "0000000000000000050020ff05831a43c822781252791020a395abdbcc54ed60"
+
+	err = chainSimulator.setKeyValueSystemAccount(map[string]string{
+		hex.EncodeToString([]byte(authKey)): authValue,
+	})
+	require.NoError(t, err)
+
+	expectedValue, err := hex.DecodeString(authValue)
+	require.NoError(t, err)
+
+	for _, shardID := range []uint32{0, 1, 2, core.MetachainShardId} {
+		nodeHandler := chainSimulator.GetNodeHandler(shardID)
+		account, loadErr := nodeHandler.GetStateComponents().AccountsAdapter().LoadAccount(core.SystemAccountAddress)
+		require.NoError(t, loadErr, "shard %d should load system account", shardID)
+		userAccount, ok := account.(state.UserAccountHandler)
+		require.True(t, ok, "shard %d system account should be a user account", shardID)
+		require.NotEmpty(t, userAccount.GetRootHash(), "shard %d system account should have a data trie root hash after setKeyValueSystemAccount", shardID)
+
+		value, _, retrieveErr := userAccount.RetrieveValue([]byte(authKey))
+		require.NoError(t, retrieveErr, "shard %d should retrieve DRWA authorized caller key", shardID)
+		require.Equal(t, expectedValue, value, "shard %d should have replicated DRWA authorized caller value", shardID)
+	}
+}
+
+func TestChainSimulator_setKeyValueSystemAccount_WithSimulatorMutexHeld_ReplicatesAcrossShards(t *testing.T) {
+	if testing.Short() {
+		t.Skip("this is not a short test")
+	}
+
+	startTime := time.Now().Unix()
+	roundDurationInMillis := uint64(6000)
+	roundsPerEpoch := core.OptionalUint64{
+		HasValue: true,
+		Value:    20,
+	}
+	chainSimulator, err := NewChainSimulator(ArgsChainSimulator{
+		BypassTxSignatureCheck: true,
+		TempDir:                t.TempDir(),
+		PathToInitialConfig:    defaultPathToInitialConfig,
+		NumOfShards:            3,
+		GenesisTimestamp:       startTime,
+		RoundDurationInMillis:  roundDurationInMillis,
+		RoundsPerEpoch:         roundsPerEpoch,
+		ApiInterface:           api.NewNoApiInterface(),
+		MinNodesPerShard:       1,
+		MetaChainMinNodes:      1,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, chainSimulator)
+	defer chainSimulator.Close()
+
+	const authKey = "drwa:auth:identity_registry"
+	const authValue = "0000000000000000050020ff05831a43c822781252791020a395abdbcc54ed60"
+
+	chainSimulator.mutex.Lock()
+	err = chainSimulator.setKeyValueSystemAccount(map[string]string{
+		hex.EncodeToString([]byte(authKey)): authValue,
+	})
+	chainSimulator.mutex.Unlock()
+	require.NoError(t, err)
+
+	expectedValue, err := hex.DecodeString(authValue)
+	require.NoError(t, err)
+
+	for _, shardID := range []uint32{0, 1, 2, core.MetachainShardId} {
+		nodeHandler := chainSimulator.GetNodeHandler(shardID)
+		account, loadErr := nodeHandler.GetStateComponents().AccountsAdapter().LoadAccount(core.SystemAccountAddress)
+		require.NoError(t, loadErr, "shard %d should load system account", shardID)
+		userAccount, ok := account.(state.UserAccountHandler)
+		require.True(t, ok, "shard %d system account should be a user account", shardID)
+		require.NotEmpty(t, userAccount.GetRootHash(), "shard %d system account should have a data trie root hash after locked setKeyValueSystemAccount", shardID)
+
+		value, _, retrieveErr := userAccount.RetrieveValue([]byte(authKey))
+		require.NoError(t, retrieveErr, "shard %d should retrieve DRWA authorized caller key", shardID)
+		require.Equal(t, expectedValue, value, "shard %d should have replicated DRWA authorized caller value", shardID)
+	}
+}
+
+func TestChainSimulator_SystemAccountDirectSaveAccountPersistsAcrossCommit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("this is not a short test")
+	}
+
+	startTime := time.Now().Unix()
+	roundDurationInMillis := uint64(6000)
+	roundsPerEpoch := core.OptionalUint64{
+		HasValue: true,
+		Value:    20,
+	}
+	chainSimulator, err := NewChainSimulator(ArgsChainSimulator{
+		BypassTxSignatureCheck: true,
+		TempDir:                t.TempDir(),
+		PathToInitialConfig:    defaultPathToInitialConfig,
+		NumOfShards:            3,
+		GenesisTimestamp:       startTime,
+		RoundDurationInMillis:  roundDurationInMillis,
+		RoundsPerEpoch:         roundsPerEpoch,
+		ApiInterface:           api.NewNoApiInterface(),
+		MinNodesPerShard:       1,
+		MetaChainMinNodes:      1,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, chainSimulator)
+	defer chainSimulator.Close()
+
+	const authKey = "drwa:auth:identity_registry"
+	const authValueHex = "0000000000000000050020ff05831a43c822781252791020a395abdbcc54ed60"
+
+	authValue, err := hex.DecodeString(authValueHex)
+	require.NoError(t, err)
+
+	nodeHandler := chainSimulator.GetNodeHandler(0)
+	accountsAdapter := nodeHandler.GetStateComponents().AccountsAdapter()
+
+	account, err := accountsAdapter.LoadAccount(core.SystemAccountAddress)
+	require.NoError(t, err)
+	userAccount, ok := account.(state.UserAccountHandler)
+	require.True(t, ok)
+
+	err = userAccount.SaveKeyValue([]byte(authKey), authValue)
+	require.NoError(t, err)
+	err = accountsAdapter.SaveAccount(userAccount)
+	require.NoError(t, err)
+
+	accountBeforeCommit, err := accountsAdapter.GetExistingAccount(core.SystemAccountAddress)
+	require.NoError(t, err)
+	userAccountBeforeCommit, ok := accountBeforeCommit.(state.UserAccountHandler)
+	require.True(t, ok)
+	t.Logf("before commit system root hash: %x", userAccountBeforeCommit.GetRootHash())
+
+	valueBeforeCommit, _, err := userAccountBeforeCommit.RetrieveValue([]byte(authKey))
+	require.NoError(t, err)
+	t.Logf("before commit system value len: %d", len(valueBeforeCommit))
+
+	_, err = accountsAdapter.Commit()
+	require.NoError(t, err)
+
+	accountAfterCommit, err := accountsAdapter.GetExistingAccount(core.SystemAccountAddress)
+	require.NoError(t, err)
+	userAccountAfterCommit, ok := accountAfterCommit.(state.UserAccountHandler)
+	require.True(t, ok)
+	t.Logf("after commit system root hash: %x", userAccountAfterCommit.GetRootHash())
+
+	valueAfterCommit, _, err := userAccountAfterCommit.RetrieveValue([]byte(authKey))
+	require.NoError(t, err)
+	t.Logf("after commit system value len: %d", len(valueAfterCommit))
+
+	loadedAccountAfterCommit, err := accountsAdapter.LoadAccount(core.SystemAccountAddress)
+	require.NoError(t, err)
+	loadedUserAccountAfterCommit, ok := loadedAccountAfterCommit.(state.UserAccountHandler)
+	require.True(t, ok)
+	t.Logf("after commit via LoadAccount root hash: %x", loadedUserAccountAfterCommit.GetRootHash())
+
+	loadedValueAfterCommit, _, err := loadedUserAccountAfterCommit.RetrieveValue([]byte(authKey))
+	require.NoError(t, err)
+	t.Logf("after commit via LoadAccount value len: %d", len(loadedValueAfterCommit))
+}
+
+func TestChainSimulator_SystemAccountSequentialNodeWritesDoNotEraseEarlierShard(t *testing.T) {
+	if testing.Short() {
+		t.Skip("this is not a short test")
+	}
+
+	startTime := time.Now().Unix()
+	roundDurationInMillis := uint64(6000)
+	roundsPerEpoch := core.OptionalUint64{
+		HasValue: true,
+		Value:    20,
+	}
+	chainSimulator, err := NewChainSimulator(ArgsChainSimulator{
+		BypassTxSignatureCheck: true,
+		TempDir:                t.TempDir(),
+		PathToInitialConfig:    defaultPathToInitialConfig,
+		NumOfShards:            3,
+		GenesisTimestamp:       startTime,
+		RoundDurationInMillis:  roundDurationInMillis,
+		RoundsPerEpoch:         roundsPerEpoch,
+		ApiInterface:           api.NewNoApiInterface(),
+		MinNodesPerShard:       1,
+		MetaChainMinNodes:      1,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, chainSimulator)
+	defer chainSimulator.Close()
+
+	const authKey = "drwa:auth:identity_registry"
+	const authValueHex = "0000000000000000050020ff05831a43c822781252791020a395abdbcc54ed60"
+
+	authValue, err := hex.DecodeString(authValueHex)
+	require.NoError(t, err)
+
+	writeOnNode := func(shardID uint32) {
+		nodeHandler := chainSimulator.GetNodeHandler(shardID)
+		accountsAdapter := nodeHandler.GetStateComponents().AccountsAdapter()
+		account, loadErr := accountsAdapter.LoadAccount(core.SystemAccountAddress)
+		require.NoError(t, loadErr)
+		userAccount, ok := account.(state.UserAccountHandler)
+		require.True(t, ok)
+		require.NoError(t, userAccount.SaveKeyValue([]byte(authKey), authValue))
+		require.NoError(t, accountsAdapter.SaveAccount(userAccount))
+		_, commitErr := accountsAdapter.Commit()
+		require.NoError(t, commitErr)
+	}
+
+	readFromShardZero := func() ([]byte, []byte) {
+		nodeHandler := chainSimulator.GetNodeHandler(0)
+		account, loadErr := nodeHandler.GetStateComponents().AccountsAdapter().GetExistingAccount(core.SystemAccountAddress)
+		require.NoError(t, loadErr)
+		userAccount, ok := account.(state.UserAccountHandler)
+		require.True(t, ok)
+		value, _, retrieveErr := userAccount.RetrieveValue([]byte(authKey))
+		require.NoError(t, retrieveErr)
+		return userAccount.GetRootHash(), value
+	}
+
+	writeOnNode(0)
+	rootHashAfterShard0, valueAfterShard0 := readFromShardZero()
+	t.Logf("after shard0 write root=%x valueLen=%d", rootHashAfterShard0, len(valueAfterShard0))
+	require.NotEmpty(t, rootHashAfterShard0)
+	require.Equal(t, authValue, valueAfterShard0)
+
+	writeOnNode(1)
+	rootHashAfterShard1, valueAfterShard1 := readFromShardZero()
+	t.Logf("after shard1 write root=%x valueLen=%d", rootHashAfterShard1, len(valueAfterShard1))
+	require.NotEmpty(t, rootHashAfterShard1)
+	require.Equal(t, authValue, valueAfterShard1)
+
+	writeOnNode(2)
+	rootHashAfterShard2, valueAfterShard2 := readFromShardZero()
+	t.Logf("after shard2 write root=%x valueLen=%d", rootHashAfterShard2, len(valueAfterShard2))
+	require.NotEmpty(t, rootHashAfterShard2)
+	require.Equal(t, authValue, valueAfterShard2)
+
+	writeOnNode(core.MetachainShardId)
+	rootHashAfterMeta, valueAfterMeta := readFromShardZero()
+	t.Logf("after metachain write root=%x valueLen=%d", rootHashAfterMeta, len(valueAfterMeta))
+	require.NotEmpty(t, rootHashAfterMeta)
+	require.Equal(t, authValue, valueAfterMeta)
 }
 
 func TestChainSimulator_SetEntireState(t *testing.T) {

@@ -19,6 +19,17 @@ func (e *erroringDRWASyncAdapter) GetAuthorizedCallerAddress(domain string) ([]b
 	return []byte("ok"), nil
 }
 
+func (e *erroringDRWASyncAdapter) GetAuthorizedCallerAddressVersioned(domain string) ([]byte, uint64, error) {
+	if e.getAuthorizedCallerErr != nil {
+		return nil, 0, e.getAuthorizedCallerErr
+	}
+	return []byte("ok"), 0, nil
+}
+
+func (e *erroringDRWASyncAdapter) SetAuthorizedCallerAddressVersioned(domain string, address []byte, version uint64) error {
+	return nil
+}
+
 func TestDRWASyncTagDecodersCoverAllValidCases(t *testing.T) {
 	t.Parallel()
 
@@ -28,6 +39,7 @@ func TestDRWASyncTagDecodersCoverAllValidCases(t *testing.T) {
 		2: drwaSyncCallerIdentityRegistry,
 		3: drwaSyncCallerAttestation,
 		4: drwaSyncCallerRecoveryAdmin,
+		5: drwaSyncCallerAuthAdmin,
 	} {
 		actual, err := drwaCallerDomainFromTag(tag)
 		require.NoError(t, err)
@@ -41,6 +53,9 @@ func TestDRWASyncTagDecodersCoverAllValidCases(t *testing.T) {
 		3: drwaSyncOpHolderProfile,
 		4: drwaSyncOpHolderAuditorAuth,
 		5: drwaSyncOpHolderMirrorDelete,
+		6: drwaSyncOpAuthorizedCallerUpdate,
+		7: drwaSyncOpGovernanceApprove,
+		8: drwaSyncOpGovernanceExecute,
 	} {
 		actual, err := drwaOperationTypeFromTag(tag)
 		require.NoError(t, err)
@@ -74,6 +89,7 @@ func TestApplyDRWASyncOperationAllSupportedTypes(t *testing.T) {
 	}))
 	require.NoError(t, applyDRWASyncOperation(adapter, drwaSyncOperation{
 		OperationType: drwaSyncOpHolderProfile,
+		TokenID:       "CARBON-1",
 		Holder:        "erd1holder",
 		Version:       1,
 		Body:          []byte(`{"kyc":"approved"}`),
@@ -119,6 +135,6 @@ func TestIsDRWASyncCallerAuthorizedHandlesAdapterErrors(t *testing.T) {
 	adapter := &erroringDRWASyncAdapter{getAuthorizedCallerErr: errors.New("read failed")}
 	allowed := isDRWASyncCallerAuthorized(adapter, drwaSyncCallerPolicyRegistry, []drwaSyncOperation{
 		{OperationType: drwaSyncOpTokenPolicy},
-	}, []byte("policy_registry"))
+	}, testDRWACallerAddress(drwaSyncCallerPolicyRegistry))
 	require.False(t, allowed)
 }

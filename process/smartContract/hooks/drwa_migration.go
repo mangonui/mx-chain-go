@@ -349,6 +349,10 @@ func normalizeDRWAAuthorizedCallerAddress(value string) ([]byte, error) {
 	return nil, errDRWAInvalidAuthorizedCaller
 }
 
+func NormalizeDRWAAuthorizedCallerAddress(value string) ([]byte, error) {
+	return normalizeDRWAAuthorizedCallerAddress(value)
+}
+
 // decodeBech32Address decodes a bech32-encoded MultiversX address (erd1...) to
 // its raw 32-byte public key. This is a simplified decoder that validates the
 // "erd" human-readable part and extracts the 32-byte data payload.

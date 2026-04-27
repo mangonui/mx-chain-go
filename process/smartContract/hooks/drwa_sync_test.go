@@ -19,6 +19,7 @@ type mockDRWASyncStateAdapterSnapshot struct {
 	holderVersions            map[string]uint64
 	holderProfileVersions     map[string]uint64
 	holderAuditorAuthVersions map[string]uint64
+	activeTokens              map[string]bool
 	tokenBodies               map[string][]byte
 	assetBodies               map[string][]byte
 	holderBodies              map[string][]byte
@@ -33,12 +34,14 @@ type mockDRWASyncStateAdapter struct {
 	holderVersions            map[string]uint64
 	holderProfileVersions     map[string]uint64
 	holderAuditorAuthVersions map[string]uint64
+	activeTokens              map[string]bool
 	tokenBodies               map[string][]byte
 	assetBodies               map[string][]byte
 	holderBodies              map[string][]byte
 	holderProfileBodies       map[string][]byte
 	holderAuditorAuthBodies   map[string][]byte
 	authorizedCallers         map[string][]byte
+	authorizedCallerVersions  map[string]uint64
 	recoveryEvidence          map[string][]byte
 	rolloutEvidence           map[string][]byte
 	rolloutVerification       map[string][]byte
@@ -51,28 +54,37 @@ type mockDRWASyncStateAdapter struct {
 
 func newMockDRWASyncStateAdapter() *mockDRWASyncStateAdapter {
 	return &mockDRWASyncStateAdapter{
-		tokenVersions:  make(map[string]uint64),
-		assetVersions:  make(map[string]uint64),
-		holderVersions: make(map[string]uint64),
-		holderProfileVersions: make(map[string]uint64),
+		tokenVersions:             make(map[string]uint64),
+		assetVersions:             make(map[string]uint64),
+		holderVersions:            make(map[string]uint64),
+		holderProfileVersions:     make(map[string]uint64),
 		holderAuditorAuthVersions: make(map[string]uint64),
-		tokenBodies:    make(map[string][]byte),
-		assetBodies:    make(map[string][]byte),
-		holderBodies:   make(map[string][]byte),
-		holderProfileBodies: make(map[string][]byte),
-		holderAuditorAuthBodies: make(map[string][]byte),
+		activeTokens:              make(map[string]bool),
+		tokenBodies:               make(map[string][]byte),
+		assetBodies:               make(map[string][]byte),
+		holderBodies:              make(map[string][]byte),
+		holderProfileBodies:       make(map[string][]byte),
+		holderAuditorAuthBodies:   make(map[string][]byte),
 		authorizedCallers: map[string][]byte{
-			drwaSyncCallerPolicyRegistry: []byte("policy_registry"),
-			drwaSyncCallerAssetManager:   []byte("asset_manager"),
-			drwaSyncCallerIdentityRegistry: []byte("identity_registry"),
-			drwaSyncCallerAttestation: []byte("attestation"),
-			drwaSyncCallerRecoveryAdmin:  []byte("recovery_admin"),
+			drwaSyncCallerPolicyRegistry:   testDRWACallerAddress(drwaSyncCallerPolicyRegistry),
+			drwaSyncCallerAssetManager:     testDRWACallerAddress(drwaSyncCallerAssetManager),
+			drwaSyncCallerIdentityRegistry: testDRWACallerAddress(drwaSyncCallerIdentityRegistry),
+			drwaSyncCallerAttestation:      testDRWACallerAddress(drwaSyncCallerAttestation),
+			drwaSyncCallerRecoveryAdmin:    testDRWACallerAddress(drwaSyncCallerRecoveryAdmin),
+			drwaSyncCallerAuthAdmin:        testDRWACallerAddress(drwaSyncCallerAuthAdmin),
 		},
-		recoveryEvidence:    make(map[string][]byte),
-		rolloutEvidence:     make(map[string][]byte),
-		rolloutVerification: make(map[string][]byte),
-		holderIndex:         make(map[string][]string),
+		authorizedCallerVersions: make(map[string]uint64),
+		recoveryEvidence:         make(map[string][]byte),
+		rolloutEvidence:          make(map[string][]byte),
+		rolloutVerification:      make(map[string][]byte),
+		holderIndex:              make(map[string][]string),
 	}
+}
+
+func testDRWACallerAddress(domain string) []byte {
+	addr := make([]byte, drwaAuthorizedCallerAddressLen)
+	copy(addr, []byte("test:"+domain))
+	return addr
 }
 
 func (m *mockDRWASyncStateAdapter) GetTokenPolicyVersion(tokenID string) (uint64, error) {
@@ -101,6 +113,24 @@ func (m *mockDRWASyncStateAdapter) GetAuthorizedCallerAddress(domain string) ([]
 
 func (m *mockDRWASyncStateAdapter) PutAuthorizedCallerAddress(domain string, address []byte) error {
 	m.authorizedCallers[domain] = append([]byte(nil), address...)
+	return nil
+}
+
+func (m *mockDRWASyncStateAdapter) GetAuthorizedCallerAddressVersioned(domain string) ([]byte, uint64, error) {
+	return append([]byte(nil), m.authorizedCallers[domain]...), m.authorizedCallerVersions[domain], nil
+}
+
+func (m *mockDRWASyncStateAdapter) SetAuthorizedCallerAddressVersioned(domain string, address []byte, version uint64) error {
+	m.authorizedCallers[domain] = append([]byte(nil), address...)
+	m.authorizedCallerVersions[domain] = version
+	return nil
+}
+
+func (m *mockDRWASyncStateAdapter) SetDRWAActive(tokenID string) error {
+	if m.failPut {
+		return errDRWATestFailPut
+	}
+	m.activeTokens[tokenID] = true
 	return nil
 }
 
@@ -225,6 +255,7 @@ func (m *mockDRWASyncStateAdapter) Snapshot() int {
 		holderVersions:            copyMapUint64(m.holderVersions),
 		holderProfileVersions:     copyMapUint64(m.holderProfileVersions),
 		holderAuditorAuthVersions: copyMapUint64(m.holderAuditorAuthVersions),
+		activeTokens:              copyMapBool(m.activeTokens),
 		tokenBodies:               copyMapBytes(m.tokenBodies),
 		assetBodies:               copyMapBytes(m.assetBodies),
 		holderBodies:              copyMapBytes(m.holderBodies),
@@ -244,6 +275,7 @@ func (m *mockDRWASyncStateAdapter) Rollback(snapshot int) error {
 		m.holderVersions = snap.holderVersions
 		m.holderProfileVersions = snap.holderProfileVersions
 		m.holderAuditorAuthVersions = snap.holderAuditorAuthVersions
+		m.activeTokens = snap.activeTokens
 		m.tokenBodies = snap.tokenBodies
 		m.assetBodies = snap.assetBodies
 		m.holderBodies = snap.holderBodies
@@ -258,6 +290,14 @@ func (m *mockDRWASyncStateAdapter) Rollback(snapshot int) error {
 
 func copyMapUint64(src map[string]uint64) map[string]uint64 {
 	dst := make(map[string]uint64, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func copyMapBool(src map[string]bool) map[string]bool {
+	dst := make(map[string]bool, len(src))
 	for k, v := range src {
 		dst[k] = v
 	}
@@ -353,6 +393,21 @@ func TestApplyDRWASyncEnvelopeRejectsUnauthorizedCaller(t *testing.T) {
 	}
 }
 
+func TestApplyDRWASyncOperationMarksTokenActiveOnFirstPolicySync(t *testing.T) {
+	t.Parallel()
+
+	adapter := newMockDRWASyncStateAdapter()
+	err := applyDRWASyncOperation(adapter, drwaSyncOperation{
+		OperationType: drwaSyncOpTokenPolicy,
+		TokenID:       "BOND-1",
+		Version:       1,
+		Body:          []byte(`{"drwa_enabled":true}`),
+	})
+	require.NoError(t, err)
+	require.True(t, adapter.activeTokens["BOND-1"])
+	require.Equal(t, uint64(1), adapter.tokenVersions["BOND-1"])
+}
+
 func TestSerializeDRWASyncEnvelopePayloadTokenPolicyUsesZeroAddressHolder(t *testing.T) {
 	operations := []drwaSyncOperation{{
 		OperationType: drwaSyncOpTokenPolicy,
@@ -367,6 +422,9 @@ func TestSerializeDRWASyncEnvelopePayloadTokenPolicyUsesZeroAddressHolder(t *tes
 	}
 
 	expected := bytes.NewBuffer(nil)
+	schemaVersionBytes := make([]byte, 2)
+	binary.BigEndian.PutUint16(schemaVersionBytes, drwaSyncEnvelopeSchemaVersion)
+	expected.Write(schemaVersionBytes)
 	expected.WriteByte(0)
 	expected.WriteByte(0)
 	writeLengthPrefixedTest(expected, []byte("CARBON-1"))
@@ -397,6 +455,9 @@ func TestSerializeDRWASyncEnvelopePayloadHolderMirrorUsesHolderBytes(t *testing.
 
 	// callerDomain=AssetManager → tag 1, opType=HolderMirror → tag 2
 	expected := bytes.NewBuffer(nil)
+	schemaVersionBytes := make([]byte, 2)
+	binary.BigEndian.PutUint16(schemaVersionBytes, drwaSyncEnvelopeSchemaVersion)
+	expected.Write(schemaVersionBytes)
 	expected.WriteByte(1) // callerDomain: AssetManager
 	expected.WriteByte(2) // opType: HolderMirror
 	writeLengthPrefixedTest(expected, []byte("CARBON-1"))
@@ -427,6 +488,9 @@ func TestSerializeDRWASyncEnvelopePayloadHolderProfileUsesIdentityRegistryTags(t
 
 	// callerDomain=IdentityRegistry → tag 2, opType=HolderProfile → tag 3
 	expected := bytes.NewBuffer(nil)
+	schemaVersionBytes := make([]byte, 2)
+	binary.BigEndian.PutUint16(schemaVersionBytes, drwaSyncEnvelopeSchemaVersion)
+	expected.Write(schemaVersionBytes)
 	expected.WriteByte(2) // callerDomain: IdentityRegistry
 	expected.WriteByte(3) // opType: HolderProfile
 	writeLengthPrefixedTest(expected, []byte(""))
@@ -457,6 +521,9 @@ func TestSerializeDRWASyncEnvelopePayloadHolderAuditorAuthorizationUsesAttestati
 
 	// callerDomain=Attestation → tag 3, opType=HolderAuditorAuth → tag 4
 	expected := bytes.NewBuffer(nil)
+	schemaVersionBytes := make([]byte, 2)
+	binary.BigEndian.PutUint16(schemaVersionBytes, drwaSyncEnvelopeSchemaVersion)
+	expected.Write(schemaVersionBytes)
 	expected.WriteByte(3) // callerDomain: Attestation
 	expected.WriteByte(4) // opType: HolderAuditorAuth
 	writeLengthPrefixedTest(expected, []byte("CARBON-1"))
@@ -484,7 +551,7 @@ func TestApplyDRWASyncEnvelopeRejectsHashMismatch(t *testing.T) {
 		}},
 	}
 
-	_, err := applyDRWASyncEnvelope(adapter, envelope, 16, []byte("policy_registry"))
+	_, err := applyDRWASyncEnvelope(adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerPolicyRegistry))
 	if err == nil || err.Error() != drwaSyncRejectHashMismatch {
 		t.Fatalf("expected hash mismatch rejection, got %v", err)
 	}
@@ -511,7 +578,7 @@ func TestApplyDRWASyncEnvelopeRejectsCallerAddressMismatch(t *testing.T) {
 	hash, _ := computeDRWASyncHash(envelope.CallerDomain, envelope.Operations)
 	envelope.PayloadHash = hash
 
-	_, err := applyDRWASyncEnvelope(adapter, envelope, 16, []byte("asset_manager"))
+	_, err := applyDRWASyncEnvelope(adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerAssetManager))
 	if err == nil || err.Error() != drwaSyncRejectUnauthorizedCaller {
 		t.Fatalf("expected caller-address mismatch rejection, got %v", err)
 	}
@@ -553,7 +620,7 @@ func TestApplyDRWASyncEnvelopeRejectsStaleReplay(t *testing.T) {
 	hash, _ := computeDRWASyncHash(envelope.CallerDomain, envelope.Operations)
 	envelope.PayloadHash = hash
 
-	_, err := applyDRWASyncEnvelope(adapter, envelope, 16, []byte("policy_registry"))
+	_, err := applyDRWASyncEnvelope(adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerPolicyRegistry))
 	if err == nil || err.Error() != drwaSyncRejectReplayStale {
 		t.Fatalf("expected stale replay rejection, got %v", err)
 	}
@@ -574,7 +641,7 @@ func TestApplyDRWASyncEnvelopeRejectsEqualVersionConflict(t *testing.T) {
 	hash, _ := computeDRWASyncHash(envelope.CallerDomain, envelope.Operations)
 	envelope.PayloadHash = hash
 
-	_, err := applyDRWASyncEnvelope(adapter, envelope, 16, []byte("policy_registry"))
+	_, err := applyDRWASyncEnvelope(adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerPolicyRegistry))
 	if err == nil || err.Error() != drwaSyncRejectReplayDuplicate {
 		t.Fatalf("expected duplicate rejection, got %v", err)
 	}
@@ -595,7 +662,7 @@ func TestApplyDRWASyncEnvelopeRejectsVersionSkip(t *testing.T) {
 	hash, _ := computeDRWASyncHash(envelope.CallerDomain, envelope.Operations)
 	envelope.PayloadHash = hash
 
-	_, err := applyDRWASyncEnvelope(adapter, envelope, 16, []byte("policy_registry"))
+	_, err := applyDRWASyncEnvelope(adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerPolicyRegistry))
 	if err == nil || err.Error() != drwaSyncRejectVersionGap {
 		t.Fatalf("expected version-gap rejection, got %v", err)
 	}
@@ -617,7 +684,7 @@ func TestApplyDRWASyncEnvelopeRollsBackAtomically(t *testing.T) {
 	hash, _ := computeDRWASyncHash(envelope.CallerDomain, envelope.Operations)
 	envelope.PayloadHash = hash
 
-	_, err := applyDRWASyncEnvelope(adapter, envelope, 16, []byte("asset_manager"))
+	_, err := applyDRWASyncEnvelope(adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerAssetManager))
 	if err == nil {
 		t.Fatalf("expected batch failure")
 	}
@@ -638,7 +705,7 @@ func TestApplyDRWASyncEnvelopeRejectsOversizedPayload(t *testing.T) {
 	hash, _ := computeDRWASyncHash(envelope.CallerDomain, envelope.Operations)
 	envelope.PayloadHash = hash
 
-	_, err := applyDRWASyncEnvelope(adapter, envelope, 1, []byte("asset_manager"))
+	_, err := applyDRWASyncEnvelope(adapter, envelope, 1, testDRWACallerAddress(drwaSyncCallerAssetManager))
 	if err == nil || err.Error() != drwaSyncRejectPayloadTooLarge {
 		t.Fatalf("expected oversized payload rejection, got %v", err)
 	}
@@ -656,7 +723,7 @@ func TestApplyDRWASyncEnvelopeRejectsPolicyRegistryOnMixedBatch(t *testing.T) {
 	hash, _ := computeDRWASyncHash(envelope.CallerDomain, envelope.Operations)
 	envelope.PayloadHash = hash
 
-	_, err := applyDRWASyncEnvelope(adapter, envelope, 16, []byte("policy_registry"))
+	_, err := applyDRWASyncEnvelope(adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerPolicyRegistry))
 	if err == nil || err.Error() != drwaSyncRejectUnauthorizedCaller {
 		t.Fatalf("expected mixed-batch caller rejection, got %v", err)
 	}
@@ -668,6 +735,7 @@ func TestApplyDRWASyncEnvelopeAppliesHolderProfile(t *testing.T) {
 		CallerDomain: drwaSyncCallerIdentityRegistry,
 		Operations: []drwaSyncOperation{{
 			OperationType: drwaSyncOpHolderProfile,
+			TokenID:       "",
 			Holder:        "erd1holder",
 			Version:       1,
 			Body:          []byte(`{"kyc_status":"approved"}`),
@@ -676,7 +744,7 @@ func TestApplyDRWASyncEnvelopeAppliesHolderProfile(t *testing.T) {
 	hash, _ := computeDRWASyncHash(envelope.CallerDomain, envelope.Operations)
 	envelope.PayloadHash = hash
 
-	result, err := applyDRWASyncEnvelope(adapter, envelope, 16, []byte("identity_registry"))
+	result, err := applyDRWASyncEnvelope(adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerIdentityRegistry))
 	if err != nil {
 		t.Fatalf("expected success, got %v", err)
 	}
@@ -685,6 +753,59 @@ func TestApplyDRWASyncEnvelopeAppliesHolderProfile(t *testing.T) {
 	}
 	if adapter.holderProfileVersions["erd1holder"] != 1 {
 		t.Fatalf("expected holder profile version 1, got %d", adapter.holderProfileVersions["erd1holder"])
+	}
+}
+
+func TestApplyDRWASyncEnvelopeRejectsEmptyTokenIDForNonHolderProfile(t *testing.T) {
+	adapter := newMockDRWASyncStateAdapter()
+	envelope := &drwaSyncEnvelope{
+		CallerDomain: drwaSyncCallerPolicyRegistry,
+		Operations: []drwaSyncOperation{{
+			OperationType: drwaSyncOpTokenPolicy,
+			TokenID:       "",
+			Version:       1,
+			Body:          []byte(`{}`),
+		}},
+	}
+	hash, _ := computeDRWASyncHash(envelope.CallerDomain, envelope.Operations)
+	envelope.PayloadHash = hash
+
+	_, err := applyDRWASyncEnvelope(adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerPolicyRegistry))
+	if err == nil || err.Error() != "invalid TokenID in operation: empty field" {
+		t.Fatalf("expected empty token id rejection for non-holder-profile op, got %v", err)
+	}
+}
+
+func TestApplyDRWASyncEnvelopeAppliesHolderProfileWithRawAddressBytes(t *testing.T) {
+	adapter := newMockDRWASyncStateAdapter()
+	holderBytes := []byte{
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0xff, 0xff,
+	}
+	envelope := &drwaSyncEnvelope{
+		CallerDomain: drwaSyncCallerIdentityRegistry,
+		Operations: []drwaSyncOperation{{
+			OperationType: drwaSyncOpHolderProfile,
+			TokenID:       "",
+			Holder:        string(holderBytes),
+			Version:       1,
+			Body:          []byte(`{"kyc_status":"approved"}`),
+		}},
+	}
+	hash, _ := computeDRWASyncHash(envelope.CallerDomain, envelope.Operations)
+	envelope.PayloadHash = hash
+
+	result, err := applyDRWASyncEnvelope(adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerIdentityRegistry))
+	if err != nil {
+		t.Fatalf("expected success with raw binary holder address, got %v", err)
+	}
+	if result.AppliedOperations != 1 {
+		t.Fatalf(drwaTestMsgOneApplied, result.AppliedOperations)
+	}
+	if adapter.holderProfileVersions[string(holderBytes)] != 1 {
+		t.Fatalf("expected holder profile version 1, got %d", adapter.holderProfileVersions[string(holderBytes)])
 	}
 }
 
@@ -703,7 +824,7 @@ func TestApplyDRWASyncEnvelopeAppliesHolderAuditorAuthorization(t *testing.T) {
 	hash, _ := computeDRWASyncHash(envelope.CallerDomain, envelope.Operations)
 	envelope.PayloadHash = hash
 
-	result, err := applyDRWASyncEnvelope(adapter, envelope, 16, []byte("attestation"))
+	result, err := applyDRWASyncEnvelope(adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerAttestation))
 	if err != nil {
 		t.Fatalf("expected success, got %v", err)
 	}
@@ -730,7 +851,7 @@ func TestApplyDRWASyncEnvelopeRejectsIdentityRegistryWrongOperation(t *testing.T
 	hash, _ := computeDRWASyncHash(envelope.CallerDomain, envelope.Operations)
 	envelope.PayloadHash = hash
 
-	_, err := applyDRWASyncEnvelope(adapter, envelope, 16, []byte("identity_registry"))
+	_, err := applyDRWASyncEnvelope(adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerIdentityRegistry))
 	if err == nil || err.Error() != drwaSyncRejectUnauthorizedCaller {
 		t.Fatalf("expected unauthorized caller rejection, got %v", err)
 	}
@@ -750,7 +871,7 @@ func TestApplyDRWASyncEnvelopeRejectsAttestationWrongOperation(t *testing.T) {
 	hash, _ := computeDRWASyncHash(envelope.CallerDomain, envelope.Operations)
 	envelope.PayloadHash = hash
 
-	_, err := applyDRWASyncEnvelope(adapter, envelope, 16, []byte("attestation"))
+	_, err := applyDRWASyncEnvelope(adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerAttestation))
 	if err == nil || err.Error() != drwaSyncRejectUnauthorizedCaller {
 		t.Fatalf("expected unauthorized caller rejection, got %v", err)
 	}
@@ -780,7 +901,7 @@ func TestApplyDRWASyncEnvelopeRollsBackAfterPartialProgress(t *testing.T) {
 		return nil
 	}
 
-	_, err := applyDRWASyncEnvelope(adapter, envelope, 16, []byte("asset_manager"))
+	_, err := applyDRWASyncEnvelope(adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerAssetManager))
 	if err == nil {
 		t.Fatalf("expected rollback-triggering failure")
 	}
@@ -805,7 +926,7 @@ func TestApplyDRWASyncEnvelopeAppliesHigherVersion(t *testing.T) {
 	hash, _ := computeDRWASyncHash(envelope.CallerDomain, envelope.Operations)
 	envelope.PayloadHash = hash
 
-	result, err := applyDRWASyncEnvelope(adapter, envelope, 16, []byte("asset_manager"))
+	result, err := applyDRWASyncEnvelope(adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerAssetManager))
 	if err != nil {
 		t.Fatalf("expected success, got %v", err)
 	}
@@ -832,7 +953,7 @@ func TestApplyDRWASyncEnvelopeDeletesUnexpectedHolderMirror(t *testing.T) {
 	hash, _ := computeDRWASyncHash(envelope.CallerDomain, envelope.Operations)
 	envelope.PayloadHash = hash
 
-	result, err := applyDRWASyncEnvelope(adapter, envelope, 16, []byte("recovery_admin"))
+	result, err := applyDRWASyncEnvelope(adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerRecoveryAdmin))
 	if err != nil {
 		t.Fatalf("expected delete success, got %v", err)
 	}
@@ -849,6 +970,61 @@ func TestValidateDRWASyncVersionRejectsUint64OverflowBoundary(t *testing.T) {
 	require.EqualError(t, err, drwaSyncRejectVersionOverflow)
 }
 
+// TestAuthorizedCallerMalformedMetricFiresOnLengthMismatch locks in the
+// M-08 (AUD-014) observability guarantee: when the stored expected
+// address or the live caller address is not a production-shape 32-byte
+// address, the `sync_authorized_caller_malformed` metric fires so
+// operators can distinguish a corrupt provisioning record from an
+// ordinary caller rejection.
+func TestAuthorizedCallerMalformedMetricFiresOnLengthMismatch(t *testing.T) {
+	adapter := newMockDRWASyncStateAdapter()
+	shortAddress := []byte("asset_manager")
+
+	resetDRWAMetrics()
+	authorized := isDRWASyncCallerAuthorized(
+		adapter,
+		drwaSyncCallerAssetManager,
+		[]drwaSyncOperation{{
+			OperationType: drwaSyncOpHolderMirror,
+			TokenID:       "CARBON-1",
+			Holder:        "erd1holder",
+			Version:       1,
+			Body:          []byte(`{"kyc":"approved"}`),
+		}},
+		shortAddress,
+	)
+	require.False(t, authorized, "short malformed caller address must not authorize")
+	require.Equal(
+		t,
+		uint64(1),
+		snapshotDRWAMetrics()[drwaMetricAuthorizedCallerMalformed],
+		"short-address caller must increment the malformed-caller metric",
+	)
+
+	// Production-shape 32-byte addresses must NOT trigger the metric.
+	resetDRWAMetrics()
+	thirtyTwoBytes := testDRWACallerAddress(drwaSyncCallerAssetManager)
+	authorized = isDRWASyncCallerAuthorized(
+		adapter,
+		drwaSyncCallerAssetManager,
+		[]drwaSyncOperation{{
+			OperationType: drwaSyncOpHolderMirror,
+			TokenID:       "CARBON-1",
+			Holder:        "erd1holder",
+			Version:       1,
+			Body:          []byte(`{"kyc":"approved"}`),
+		}},
+		thirtyTwoBytes,
+	)
+	require.True(t, authorized, "matching 32-byte addresses must authorize")
+	require.Equal(
+		t,
+		uint64(0),
+		snapshotDRWAMetrics()[drwaMetricAuthorizedCallerMalformed],
+		"32-byte address pair must not increment the malformed-caller metric",
+	)
+}
+
 func TestRecoveryAdminRejectsUnsupportedOperationTypes(t *testing.T) {
 	adapter := newMockDRWASyncStateAdapter()
 	authorized := isDRWASyncCallerAuthorized(
@@ -860,7 +1036,7 @@ func TestRecoveryAdminRejectsUnsupportedOperationTypes(t *testing.T) {
 			Version:       1,
 			Body:          []byte(`{}`),
 		}},
-		[]byte("recovery_admin"),
+		testDRWACallerAddress(drwaSyncCallerRecoveryAdmin),
 	)
 
 	require.False(t, authorized)
@@ -880,7 +1056,7 @@ func TestApplyDRWASyncEnvelopeRejectsAssetManagerDeleteOperation(t *testing.T) {
 	hash, _ := computeDRWASyncHash(envelope.CallerDomain, envelope.Operations)
 	envelope.PayloadHash = hash
 
-	_, err := applyDRWASyncEnvelope(adapter, envelope, 16, []byte("asset_manager"))
+	_, err := applyDRWASyncEnvelope(adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerAssetManager))
 	if err == nil || err.Error() != drwaSyncRejectUnauthorizedCaller {
 		t.Fatalf("expected unauthorized delete rejection, got %v", err)
 	}
@@ -958,8 +1134,8 @@ func TestDRWAHookStateAdapterWritesProfileAndAuditorAuthorization(t *testing.T) 
 				return nil, nil
 			}
 		},
-		SaveAccountCalled: func(account vmcommon.AccountHandler) error { return nil },
-		JournalLenCalled: func() int { return 1 },
+		SaveAccountCalled:      func(account vmcommon.AccountHandler) error { return nil },
+		JournalLenCalled:       func() int { return 1 },
 		RevertToSnapshotCalled: func(snapshot int) error { return nil },
 	}
 
@@ -1014,8 +1190,8 @@ func TestDecodeDRWASyncEnvelopeBinaryPathAndApply(t *testing.T) {
 	// This is exactly what build_sync_hook_payload in Rust produces.
 	binaryPayload := append(hash, canonical...)
 
-	// The first byte of a binary payload is never '{' (it is the caller tag byte 0x00
-	// for PolicyRegistry), so decodeDRWASyncEnvelope must route to the binary path.
+	// The first byte of a binary payload is never '{' (it is the hash prefix), so
+	// decodeDRWASyncEnvelope must route to the binary path.
 	if binaryPayload[0] == '{' {
 		t.Fatalf("test invariant broken: binary payload starts with '{'")
 	}
@@ -1040,7 +1216,7 @@ func TestDecodeDRWASyncEnvelopeBinaryPathAndApply(t *testing.T) {
 
 	// Apply to state adapter — proves the mirror is atomically updated.
 	adapter := newMockDRWASyncStateAdapter()
-	result, err := applyDRWASyncEnvelope(adapter, envelope, 16, []byte("policy_registry"))
+	result, err := applyDRWASyncEnvelope(adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerPolicyRegistry))
 	if err != nil {
 		t.Fatalf("apply failed: %v", err)
 	}
@@ -1053,6 +1229,36 @@ func TestDecodeDRWASyncEnvelopeBinaryPathAndApply(t *testing.T) {
 	if !bytes.Equal(adapter.tokenBodies["BOND-1"], policyBody) {
 		t.Fatalf("mirror body mismatch")
 	}
+}
+
+func TestDecodeDRWASyncEnvelopeBinaryHolderProfileAllowsEmptyTokenID(t *testing.T) {
+	holderBytes := append([]byte{0x01}, bytes.Repeat([]byte{0x00}, 31)...)
+	holder := string(holderBytes)
+	operations := []drwaSyncOperation{{
+		OperationType: drwaSyncOpHolderProfile,
+		TokenID:       "",
+		Holder:        holder,
+		Version:       2,
+		Body:          []byte(`{"kyc_status":"approved"}`),
+	}}
+
+	canonical, err := serializeDRWASyncEnvelopePayload(drwaSyncCallerIdentityRegistry, operations)
+	require.NoError(t, err)
+
+	hash, err := computeDRWASyncHash(drwaSyncCallerIdentityRegistry, operations)
+	require.NoError(t, err)
+
+	binaryPayload := append(hash, canonical...)
+	envelope, err := decodeDRWASyncEnvelope(binaryPayload)
+	require.NoError(t, err)
+
+	require.Equal(t, drwaSyncCallerIdentityRegistry, envelope.CallerDomain)
+	require.Len(t, envelope.Operations, 1)
+	require.Equal(t, drwaSyncOpHolderProfile, envelope.Operations[0].OperationType)
+	require.Equal(t, "", envelope.Operations[0].TokenID)
+	require.Equal(t, holder, envelope.Operations[0].Holder)
+	require.Equal(t, uint64(2), envelope.Operations[0].Version)
+	require.Equal(t, []byte(`{"kyc_status":"approved"}`), envelope.Operations[0].Body)
 }
 
 func TestDRWAHookStateAdapterRejectsWrongTypeAssertion(t *testing.T) {
@@ -1079,7 +1285,7 @@ func TestNoopEnvelopeWithNilHashRejected(t *testing.T) {
 		PayloadHash:  nil,
 		Operations:   []drwaSyncOperation{},
 	}
-	_, err := applyDRWASyncEnvelope(adapter, envelopeNilHash, 16, []byte("policy_registry"))
+	_, err := applyDRWASyncEnvelope(adapter, envelopeNilHash, 16, testDRWACallerAddress(drwaSyncCallerPolicyRegistry))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "DRWA_NOOP_ENVELOPE_HASH_REQUIRED")
 
@@ -1089,7 +1295,7 @@ func TestNoopEnvelopeWithNilHashRejected(t *testing.T) {
 		PayloadHash:  []byte{},
 		Operations:   []drwaSyncOperation{},
 	}
-	_, err = applyDRWASyncEnvelope(adapter, envelopeEmptyHash, 16, []byte("policy_registry"))
+	_, err = applyDRWASyncEnvelope(adapter, envelopeEmptyHash, 16, testDRWACallerAddress(drwaSyncCallerPolicyRegistry))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "DRWA_NOOP_ENVELOPE_HASH_REQUIRED")
 
@@ -1101,7 +1307,7 @@ func TestNoopEnvelopeWithNilHashRejected(t *testing.T) {
 		PayloadHash:  validHash,
 		Operations:   []drwaSyncOperation{},
 	}
-	result, err := applyDRWASyncEnvelope(adapter, envelopeValidHash, 16, []byte("policy_registry"))
+	result, err := applyDRWASyncEnvelope(adapter, envelopeValidHash, 16, testDRWACallerAddress(drwaSyncCallerPolicyRegistry))
 	require.NoError(t, err)
 	require.True(t, result.Noop)
 }
@@ -1148,7 +1354,7 @@ func TestApplyDRWASyncEnvelopeRejectsMultiTokenRecoveryScope(t *testing.T) {
 	require.NoError(t, err)
 	envelope.PayloadHash = hash
 
-	_, err = applyDRWASyncEnvelope(adapter, envelope, 16, []byte("recovery_admin"))
+	_, err = applyDRWASyncEnvelope(adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerRecoveryAdmin))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), drwaSyncRejectRecoveryScopeMultiToken)
 
@@ -1178,7 +1384,7 @@ func TestApplyDRWASyncEnvelopeAcceptsSingleTokenRecoveryScope(t *testing.T) {
 	require.NoError(t, err)
 	envelope.PayloadHash = hash
 
-	result, err := applyDRWASyncEnvelope(adapter, envelope, 16, []byte("recovery_admin"))
+	result, err := applyDRWASyncEnvelope(adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerRecoveryAdmin))
 	require.NoError(t, err)
 	require.Equal(t, 1, result.AppliedOperations)
 	require.Equal(t, uint64(1), adapter.tokenVersions[drwaF1TokenA])
@@ -1213,7 +1419,7 @@ func TestApplyDRWASyncEnvelopeMultiTokenAllowedForNonRecoveryDomains(t *testing.
 	require.NoError(t, err)
 	envelope.PayloadHash = hash
 
-	result, err := applyDRWASyncEnvelope(adapter, envelope, 16, []byte("policy_registry"))
+	result, err := applyDRWASyncEnvelope(adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerPolicyRegistry))
 	require.NoError(t, err)
 	require.Equal(t, 2, result.AppliedOperations)
 	require.Equal(t, uint64(1), adapter.tokenVersions[drwaF1TokenA])

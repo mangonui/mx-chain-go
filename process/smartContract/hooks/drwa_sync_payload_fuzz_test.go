@@ -57,6 +57,21 @@ func FuzzDRWASyncEnvelopeDecode(f *testing.F) {
 		}
 	}
 
+	// Seed: valid binary payload for auth_admin authorized_caller_update.
+	validAuthOps := []drwaSyncOperation{{
+		OperationType: drwaSyncOpAuthorizedCallerUpdate,
+		TokenID:       drwaSyncCallerPolicyRegistry,
+		Version:       1,
+		Body:          []byte("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+	}}
+	authCanonical, authErr := serializeDRWASyncEnvelopePayload(drwaSyncCallerAuthAdmin, validAuthOps)
+	if authErr == nil {
+		authHash, hashErr := computeDRWASyncHash(drwaSyncCallerAuthAdmin, validAuthOps)
+		if hashErr == nil {
+			f.Add(append(authHash, authCanonical...))
+		}
+	}
+
 	// Seed: payload larger than drwaSyncMaxPayloadBytes — one byte over limit.
 	oversized := make([]byte, drwaSyncMaxPayloadBytes+1)
 	f.Add(oversized)
@@ -93,10 +108,10 @@ func TestDRWASyncPayloadNegative(t *testing.T) {
 	validBinaryPayload := append(validHash, validCanonical...)
 
 	type tableCase struct {
-		name        string
-		payload     func() []byte
-		wantErrSub  string // substring that must appear in the error message
-		wantNilErr  bool   // if true, expect no error (smoke-check a valid payload)
+		name       string
+		payload    func() []byte
+		wantErrSub string // substring that must appear in the error message
+		wantNilErr bool   // if true, expect no error (smoke-check a valid payload)
 	}
 
 	cases := []tableCase{
@@ -189,7 +204,7 @@ func TestDRWASyncPayloadNegative(t *testing.T) {
 		}
 		envelope.PayloadHash = hash
 
-		_, applyErr := applyDRWASyncEnvelope(adapter, envelope, 16, []byte("policy_registry"))
+		_, applyErr := applyDRWASyncEnvelope(adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerPolicyRegistry))
 		if applyErr == nil || applyErr.Error() != drwaSyncRejectReplayStale {
 			t.Fatalf("expected %s, got %v", drwaSyncRejectReplayStale, applyErr)
 		}
@@ -222,7 +237,7 @@ func TestDRWASyncPayloadNegative(t *testing.T) {
 		}
 		envelope.PayloadHash = hash
 
-		_, applyErr := applyDRWASyncEnvelope(adapter, envelope, 16, []byte("policy_registry"))
+		_, applyErr := applyDRWASyncEnvelope(adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerPolicyRegistry))
 		if applyErr == nil || applyErr.Error() != drwaSyncRejectUnauthorizedCaller {
 			t.Fatalf("expected %s, got %v", drwaSyncRejectUnauthorizedCaller, applyErr)
 		}
@@ -247,7 +262,7 @@ func TestDRWASyncPayloadNegative(t *testing.T) {
 		}
 		envelope.PayloadHash = hash
 
-		_, applyErr := applyDRWASyncEnvelope(adapter, envelope, 16, []byte("policy_registry"))
+		_, applyErr := applyDRWASyncEnvelope(adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerPolicyRegistry))
 		if applyErr == nil || applyErr.Error() != drwaSyncRejectVersionGap {
 			t.Fatalf("expected %s for version skip, got %v", drwaSyncRejectVersionGap, applyErr)
 		}
@@ -307,7 +322,7 @@ func TestDRWASyncPayloadBinaryRoundTrip(t *testing.T) {
 	}
 
 	adapter := newMockDRWASyncStateAdapter()
-	result, err := applyDRWASyncEnvelope(adapter, envelope, 16, []byte("policy_registry"))
+	result, err := applyDRWASyncEnvelope(adapter, envelope, 16, testDRWACallerAddress(drwaSyncCallerPolicyRegistry))
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
@@ -334,12 +349,11 @@ func TestDRWASyncPayloadVersionFieldEncoding(t *testing.T) {
 		t.Fatalf("serialize: %v", err)
 	}
 
-	// Layout after the caller-tag byte and one op-tag byte:
-	// [1 caller tag] [1 op tag] [4 token-id length] [token-id bytes] [4 holder length] [32 holder zeros] [8 version] [4 body length]
-	tokenIDLen := 3  // "V-1"
-	holderLen := 32  // zero placeholder for token_policy
-	// version starts at: 1 + 1 + 4 + tokenIDLen + 4 + holderLen
-	versionOffset := 1 + 1 + 4 + tokenIDLen + 4 + holderLen
+	// Layout before the version field:
+	// [2 schema version] [1 caller tag] [1 op tag] [4 token-id length] [token-id bytes] [4 holder length] [32 holder zeros]
+	tokenIDLen := 3 // "V-1"
+	holderLen := 32 // zero placeholder for token_policy
+	versionOffset := 2 + 1 + 1 + 4 + tokenIDLen + 4 + holderLen
 	if len(payload) < versionOffset+8 {
 		t.Fatalf("payload too short: %d bytes", len(payload))
 	}
@@ -348,6 +362,87 @@ func TestDRWASyncPayloadVersionFieldEncoding(t *testing.T) {
 	if gotVersion != wantVersion {
 		t.Fatalf("expected version 0x%016X, got 0x%016X", wantVersion, gotVersion)
 	}
+}
+
+func TestDRWASyncPayloadV2RecoveryGovernanceDecode(t *testing.T) {
+	proposalID := bytes.Repeat([]byte{0xAB}, 32)
+	ops := []drwaSyncOperation{{
+		OperationType: drwaSyncOpGovernanceApprove,
+		Version:       1,
+		Body:          proposalID,
+	}}
+	hash, err := computeDRWASyncHash(drwaSyncCallerRecoveryAdmin, ops)
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+
+	canonical := make([]byte, 0)
+	canonical = binary.BigEndian.AppendUint16(canonical, drwaSyncEnvelopeSchemaVersionWithRecovery)
+	canonical = append(canonical, 4) // recovery_admin
+	canonical = appendDRWATestLenPrefixed(canonical, bytes.Repeat([]byte{0xCD}, 32))
+	canonical = binary.BigEndian.AppendUint16(canonical, 1)
+	canonical = appendDRWATestLenPrefixed(canonical, []byte("CARBON-ab12cd"))
+	canonical = binary.BigEndian.AppendUint16(canonical, 1)
+	canonical = append(canonical, 7) // governance approve
+	canonical = appendDRWATestLenPrefixed(canonical, nil)
+	canonical = appendDRWATestLenPrefixed(canonical, nil)
+	canonical = binary.BigEndian.AppendUint64(canonical, 1)
+	canonical = appendDRWATestLenPrefixed(canonical, proposalID)
+
+	envelope, err := decodeDRWASyncEnvelope(append(hash, canonical...))
+	if err != nil {
+		t.Fatalf("decode v2 recovery governance payload: %v", err)
+	}
+	if envelope.SchemaVersion != drwaSyncEnvelopeSchemaVersionWithRecovery {
+		t.Fatalf("expected schema v2, got %d", envelope.SchemaVersion)
+	}
+	if envelope.CallerDomain != drwaSyncCallerRecoveryAdmin {
+		t.Fatalf("expected recovery_admin caller, got %q", envelope.CallerDomain)
+	}
+	if len(envelope.PreRecoveryStateHash) != 32 {
+		t.Fatalf("expected 32-byte pre-recovery hash, got %d", len(envelope.PreRecoveryStateHash))
+	}
+	if len(envelope.RecoveryScope) != 1 || envelope.RecoveryScope[0] != "CARBON-ab12cd" {
+		t.Fatalf("unexpected recovery scope: %#v", envelope.RecoveryScope)
+	}
+	if len(envelope.Operations) != 1 || envelope.Operations[0].OperationType != drwaSyncOpGovernanceApprove {
+		t.Fatalf("unexpected operations: %#v", envelope.Operations)
+	}
+	if !bytes.Equal(envelope.Operations[0].Body, proposalID) {
+		t.Fatalf("proposal body mismatch")
+	}
+}
+
+func TestDRWASyncPayloadRejectsUnsupportedSchemaVersion(t *testing.T) {
+	payload, err := serializeDRWASyncEnvelopePayload(drwaSyncCallerPolicyRegistry, []drwaSyncOperation{{
+		OperationType: drwaSyncOpTokenPolicy,
+		TokenID:       "V-1",
+		Version:       1,
+		Body:          []byte{},
+	}})
+	if err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
+	hash, err := computeDRWASyncHash(drwaSyncCallerPolicyRegistry, []drwaSyncOperation{{
+		OperationType: drwaSyncOpTokenPolicy,
+		TokenID:       "V-1",
+		Version:       1,
+		Body:          []byte{},
+	}})
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+
+	payload[1] = 99
+	_, err = decodeDRWASyncEnvelope(append(hash, payload...))
+	if err == nil || !containsString(err.Error(), "unsupported DRWA binary sync schema version: 99") {
+		t.Fatalf("expected unsupported schema version rejection, got %v", err)
+	}
+}
+
+func appendDRWATestLenPrefixed(dest []byte, value []byte) []byte {
+	dest = binary.BigEndian.AppendUint32(dest, uint32(len(value)))
+	return append(dest, value...)
 }
 
 // containsString reports whether s contains substr.  Avoids importing strings.
