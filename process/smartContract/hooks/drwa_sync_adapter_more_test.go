@@ -396,6 +396,28 @@ func TestBlockChainHookApplyDRWASyncEnvelopeBytesRejectsMalformedCallerAddress(t
 	require.Equal(t, uint64(1), snapshotDRWAMetrics()[drwaMetricAuthorizedCallerMalformed])
 }
 
+func TestBlockChainHookApplyDRWASyncEnvelopeBytesRejectsZeroCallerAddress(t *testing.T) {
+	hook := &BlockChainHookImpl{}
+	operations := []drwaSyncOperation{{
+		OperationType: drwaSyncOpTokenPolicy,
+		TokenID:       "CARBON-APPLY",
+		Version:       1,
+		Body:          []byte(`{"regulated":true}`),
+	}}
+
+	payload, err := serializeDRWASyncEnvelopePayload(drwaSyncCallerPolicyRegistry, operations)
+	require.NoError(t, err)
+	hash, err := computeDRWASyncHash(drwaSyncCallerPolicyRegistry, operations)
+	require.NoError(t, err)
+
+	hookPayload := append(append([]byte(nil), hash...), payload...)
+	resetDRWAMetrics()
+
+	err = hook.ApplyDRWASyncEnvelopeBytes(hookPayload, make([]byte, drwaAuthorizedCallerAddressLen))
+	require.EqualError(t, err, drwaSyncRejectUnauthorizedCaller)
+	require.Equal(t, uint64(1), snapshotDRWAMetrics()[drwaMetricAuthorizedCallerMalformed])
+}
+
 func TestBlockChainHookApplyDRWASyncEnvelopeBytesAuthAdminVersionedUpdate(t *testing.T) {
 	systemAccount := vmmock.NewAccountWrapMock(core.SystemAccountAddress)
 	accountsStub := &state.AccountsStub{

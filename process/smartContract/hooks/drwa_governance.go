@@ -10,26 +10,26 @@ import (
 )
 
 var (
-	errDRWAGovernanceNilStore             = errors.New("nil DRWA governance store")
-	errDRWAGovernanceNilCaller            = errors.New("nil caller address for governance operation")
-	errDRWAGovernanceNilEnvelope          = errors.New("nil envelope for governance proposal")
-	errDRWAGovernanceNotEnabled           = errors.New("DRWA governance not enabled for token")
-	errDRWAGovernanceSignerNotAuthorized  = errors.New("caller is not an authorized governance signer")
-	errDRWAGovernanceDuplicateApproval    = errors.New("caller has already approved this proposal")
-	errDRWAGovernanceProposalNotFound     = errors.New("governance proposal not found")
-	errDRWAGovernanceProposalIDCollision  = errors.New("governance proposal id collision")
-	errDRWAGovernanceProposalExpired      = errors.New("governance proposal has expired (TTL exceeded)")
-	errDRWAGovernanceProposalExecuted     = errors.New("governance proposal has already been executed")
-	errDRWAGovernanceThresholdNotMet      = errors.New("governance approval threshold not met")
-	errDRWAGovernanceInvalidThreshold     = errors.New("governance threshold must be >= 2")
-	errDRWAGovernanceThresholdExceedsLen  = errors.New("governance threshold exceeds number of signers")
-	errDRWAGovernanceDuplicateSigner      = errors.New("governance config contains duplicate signer")
-	errDRWAGovernanceNoSigners            = errors.New("governance config has no signers")
-	errDRWAGovernanceTooManySigners       = errors.New("governance config exceeds maximum signer count")
-	errDRWAGovernanceInvalidMaxSigners    = errors.New("governance MaxSigners must be >= threshold and <= drwaGovernanceAbsoluteMaxSigners")
-	errDRWAGovernanceInvalidProposalTTL   = errors.New("governance ProposalTTL must be > 0")
+	errDRWAGovernanceNilStore              = errors.New("nil DRWA governance store")
+	errDRWAGovernanceNilCaller             = errors.New("nil caller address for governance operation")
+	errDRWAGovernanceNilEnvelope           = errors.New("nil envelope for governance proposal")
+	errDRWAGovernanceNotEnabled            = errors.New("DRWA governance not enabled for token")
+	errDRWAGovernanceSignerNotAuthorized   = errors.New("caller is not an authorized governance signer")
+	errDRWAGovernanceDuplicateApproval     = errors.New("caller has already approved this proposal")
+	errDRWAGovernanceProposalNotFound      = errors.New("governance proposal not found")
+	errDRWAGovernanceProposalIDCollision   = errors.New("governance proposal id collision")
+	errDRWAGovernanceProposalExpired       = errors.New("governance proposal has expired (TTL exceeded)")
+	errDRWAGovernanceProposalExecuted      = errors.New("governance proposal has already been executed")
+	errDRWAGovernanceThresholdNotMet       = errors.New("governance approval threshold not met")
+	errDRWAGovernanceInvalidThreshold      = errors.New("governance threshold must be >= 2")
+	errDRWAGovernanceThresholdExceedsLen   = errors.New("governance threshold exceeds number of signers")
+	errDRWAGovernanceDuplicateSigner       = errors.New("governance config contains duplicate signer")
+	errDRWAGovernanceNoSigners             = errors.New("governance config has no signers")
+	errDRWAGovernanceTooManySigners        = errors.New("governance config exceeds maximum signer count")
+	errDRWAGovernanceInvalidMaxSigners     = errors.New("governance MaxSigners must be >= threshold and <= drwaGovernanceAbsoluteMaxSigners")
+	errDRWAGovernanceInvalidProposalTTL    = errors.New("governance ProposalTTL must be > 0")
 	errDRWAGovernanceConfigVersionMismatch = errors.New("governance config version mismatch")
-	errDRWAGovernanceEnvelopeHashMismatch = errors.New("governance envelope payload hash does not match stored hash (M-13: storage tampering or serde drift)")
+	errDRWAGovernanceEnvelopeHashMismatch  = errors.New("governance envelope payload hash does not match stored hash (M-13: storage tampering or serde drift)")
 )
 
 const (
@@ -70,7 +70,7 @@ var (
 
 // DRWAGovernanceConfig defines the M-of-N multi-sig quorum for a governed token.
 type DRWAGovernanceConfig struct {
-	Version           uint64                      `json:"version,omitempty"`
+	Version           uint64                      `json:"version"`
 	Threshold         uint32                      `json:"threshold"`
 	Signers           [][]byte                    `json:"signers"`
 	ProposalTTL       uint64                      `json:"proposal_ttl"`

@@ -327,9 +327,7 @@ func (bh *BlockChainHookImpl) GetStorageData(accountAddress []byte, index []byte
 	}
 	log.Trace("GetStorageData ", messages...)
 
-	// returning nil here ensures backwards compatibility as the error wasn't taken into account by the previous versions
-	// of the vm. Now, the VM take into account this error so the processMaxReadsCounters call can stop the execution of the contract
-	return value, trieDepth, nil
+	return value, trieDepth, err
 }
 
 func (bh *BlockChainHookImpl) syncIfMissingDataTrieNode(err error) {
@@ -507,6 +505,10 @@ func (bh *BlockChainHookImpl) ApplyDRWASyncEnvelopeBytes(payload []byte, callerA
 		return err
 	}
 	if len(callerAddress) != drwaAuthorizedCallerAddressLen {
+		recordDRWAMetric(drwaMetricAuthorizedCallerMalformed)
+		return errors.New(drwaSyncRejectUnauthorizedCaller)
+	}
+	if bytes.Equal(callerAddress, make([]byte, drwaAuthorizedCallerAddressLen)) {
 		recordDRWAMetric(drwaMetricAuthorizedCallerMalformed)
 		return errors.New(drwaSyncRejectUnauthorizedCaller)
 	}
@@ -904,7 +906,7 @@ func (bh *BlockChainHookImpl) IsBuiltinFunctionName(functionName string) bool {
 // GetAllState returns the underlying state of a given account
 // TODO remove this func completely
 func (bh *BlockChainHookImpl) GetAllState(_ []byte) (map[string][]byte, error) {
-	return nil, nil
+	return nil, ErrNotImplemented
 }
 
 // GetESDTToken returns the unmarshalled esdt data for the given key

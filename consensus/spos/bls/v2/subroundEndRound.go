@@ -3,9 +3,11 @@ package v2
 import (
 	"bytes"
 	"context"
+	cryptoRand "crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/big"
 	"math/rand"
 	"sync"
 	"time"
@@ -656,10 +658,19 @@ func (sr *subroundEndRound) getRandomManagedKeyProofSender() string {
 		return sr.SelfPubKey() // fallback return self pub key, should never happen
 	}
 
-	randIdx := rand.Intn(len(consensusKeysManagedByCurrentNode))
+	randIdx := getRandomInt(len(consensusKeysManagedByCurrentNode))
 	randManagedKey := consensusKeysManagedByCurrentNode[randIdx]
 
 	return randManagedKey
+}
+
+func getRandomInt(max int) int {
+	randBig, err := cryptoRand.Int(cryptoRand.Reader, big.NewInt(int64(max)))
+	if err != nil {
+		return rand.Intn(max)
+	}
+
+	return int(randBig.Int64())
 }
 
 func (sr *subroundEndRound) createAndBroadcastInvalidSigners(

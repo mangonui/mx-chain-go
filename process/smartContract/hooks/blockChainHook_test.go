@@ -394,7 +394,7 @@ func TestBlockChainHookImpl_GetStorageData(t *testing.T) {
 		require.Equal(t, []byte{}, storageData)
 		require.Nil(t, err)
 	})
-	t.Run("cannot retrieve account value should return nil error", func(t *testing.T) {
+	t.Run("cannot retrieve account value should return error", func(t *testing.T) {
 		t.Parallel()
 
 		args := createMockBlockChainHookArgs()
@@ -423,7 +423,7 @@ func TestBlockChainHookImpl_GetStorageData(t *testing.T) {
 		bh, _ := hooks.NewBlockChainHookImpl(args)
 		storageData, _, err := bh.GetStorageData(address, index)
 		require.Nil(t, storageData)
-		require.Nil(t, err)
+		require.ErrorIs(t, err, expectedErr)
 	})
 	t.Run("get existing account errors should error", func(t *testing.T) {
 		t.Parallel()
@@ -644,6 +644,16 @@ func TestBlockChainHookImpl_GetStorageData(t *testing.T) {
 
 		_, _, _ = bh.GetStorageData([]byte("address"), missingDataTrieKey)
 	})
+}
+
+func TestBlockChainHookImpl_GetAllStateShouldReturnNotImplemented(t *testing.T) {
+	t.Parallel()
+
+	bh, _ := hooks.NewBlockChainHookImpl(createMockBlockChainHookArgs())
+	stateMap, err := bh.GetAllState([]byte("address"))
+
+	require.Nil(t, stateMap)
+	require.ErrorIs(t, err, hooks.ErrNotImplemented)
 }
 
 func TestBlockChainHookImpl_NewAddressLengthNoGood(t *testing.T) {

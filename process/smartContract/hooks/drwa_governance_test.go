@@ -2,6 +2,7 @@ package hooks
 
 import (
 	"bytes"
+	"encoding/json"
 	"testing"
 
 	"github.com/multiversx/mx-chain-core-go/core"
@@ -17,6 +18,24 @@ type mockGovernanceStore struct {
 	configs      map[string]*DRWAGovernanceConfig
 	proposals    map[[32]byte]*DRWAGovernanceProposal
 	auditRecords map[[32]byte]*DRWAGovernanceAuditRecord
+}
+
+func TestDRWAGovernanceConfigJSONIncludesZeroVersion(t *testing.T) {
+	cfg := &DRWAGovernanceConfig{
+		Version:     0,
+		Threshold:   1,
+		Signers:     [][]byte{[]byte("signer")},
+		ProposalTTL: 10,
+		MaxSigners:  1,
+	}
+
+	encoded, err := json.Marshal(cfg)
+	require.NoError(t, err)
+	require.Contains(t, string(encoded), `"version":0`)
+
+	var decoded DRWAGovernanceConfig
+	require.NoError(t, json.Unmarshal(encoded, &decoded))
+	require.Equal(t, uint64(0), decoded.Version)
 }
 
 func newMockGovernanceStore() *mockGovernanceStore {
